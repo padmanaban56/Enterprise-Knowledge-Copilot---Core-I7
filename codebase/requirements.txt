@@ -1,0 +1,61 @@
+# ── Core Framework ──────────────────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
+pydantic-settings==2.2.1
+python-multipart==0.0.9
+
+# ── LLM & Embeddings (CPU-optimized) ────────────────────────────────────────
+# Small but capable: ~270MB, runs well on 8GB RAM
+sentence-transformers==3.0.0          # BAAI/bge-small-en-v1.5 (primary embeddings)
+# cross-encoder for reranking: cross-encoder/ms-marco-MiniLM-L-6-v2
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.3.0
+
+# ── LLM (Ollama handles model serving — no torch VRAM needed) ───────────────
+ollama==0.2.1                         # Python client for local Ollama server
+
+# ── Vector Store ─────────────────────────────────────────────────────────────
+qdrant-client==1.9.1
+
+# ── BM25 Sparse Retrieval ─────────────────────────────────────────────────────
+rank-bm25==0.2.2
+
+# ── Document Processing ──────────────────────────────────────────────────────
+PyMuPDF==1.24.3                       # PDF: text + page numbers
+python-docx==1.1.0                    # DOCX: headings + tables
+python-pptx==0.6.23                   # PPTX: slides
+openpyxl==3.1.2                       # XLSX
+tiktoken==0.7.0                       # Token counting for chunking
+
+# ── P9: Image-Aware Retrieval (OCR for diagrams/screenshots) ────────────────
+pytesseract==0.3.10                   # OCR (requires system tesseract-ocr binary)
+Pillow==10.3.0                        # Image decoding for OCR / vision captioning
+
+# ── NLP ──────────────────────────────────────────────────────────────────────
+spacy>=3.7.2,<3.8.0                   # Entity extraction (en_core_web_sm — CPU fast)
+# Run after install: python -m spacy download en_core_web_sm
+
+# ── Database ─────────────────────────────────────────────────────────────────
+psycopg2-binary==2.9.9
+sqlalchemy==2.0.30
+
+# ── Auth / RBAC ──────────────────────────────────────────────────────────────
+pyjwt==2.8.0
+passlib[bcrypt]==1.7.4
+
+# ── Caching / Session ────────────────────────────────────────────────────────
+redis==5.0.4
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+python-dotenv==1.0.1
+httpx==0.27.0
+pandas==2.2.2
+numpy==1.26.4
+symspellpy==6.7.7                     # Typo correction in query normalisation
+presidio-analyzer==2.2.354            # PII scrubbing
+presidio-anonymizer==2.2.354
+
+# ── Evaluation ───────────────────────────────────────────────────────────────
+scikit-learn==1.5.0
+ragas==0.1.16                         # RAG evaluation metrics

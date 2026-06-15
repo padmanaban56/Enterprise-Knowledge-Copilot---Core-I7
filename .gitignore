@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# Application uploads and temporary files
+codebase/data/uploads/*
+!codebase/data/uploads/.gitkeep
+
+# Node.js / React
+codebase/ui-react/node_modules/
+codebase/ui-react/dist/
+codebase/ui-react/build/
+.eslintcache
+
+# OS files
+.DS_Store
+Thumbs.db
