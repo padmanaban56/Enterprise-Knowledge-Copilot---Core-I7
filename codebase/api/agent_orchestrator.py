@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from configs.settings import get_settings
+from api.guardrails import SAFETY_INSTRUCTIONS
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -58,6 +59,9 @@ Rules:
 - Never call the same tool with the same input twice.
 - Respond with ONLY the JSON object, no other text.
 """
+
+
+_AGENT_SYSTEM_PROMPT += SAFETY_INSTRUCTIONS
 
 
 @dataclass

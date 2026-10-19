@@ -445,10 +445,69 @@ class ChatResponse(BaseModel):
     clarification_question: Optional[str] = None
     offer_raise_ticket: bool = False
     ticket_candidates: List[dict] = []
+    guardrail: dict = {}
+    citation_status: str = 'grounded'
+
+
+def _non_document_chat(req, current_user, reply):
+    session_id = req.session_id or str(uuid.uuid4())
+    if chat_history_service and current_user.user_id != 'anonymous':
+        chat_history_service.ensure_session(session_id, current_user.user_id, req.query)
+        chat_history_service.add_message(session_id, current_user.user_id, role='user', content=req.query)
+        chat_history_service.add_message(session_id, current_user.user_id, role='assistant', content=reply,
+            citations=[], confidence=0, retrieval_meta={'intent': 'OUT_OF_SCOPE', 'citation_status': 'not_applicable'})
+    return ChatResponse(answer=reply, citations=[], confidence=0, confidence_label='NO_SOURCES',
+        confidence_breakdown={}, chunks_used=0, low_confidence=True, latency_ms=0,
+        session_id=session_id, repositories_searched=[], expanded_queries=[], sub_queries=[],
+        intent='OUT_OF_SCOPE', hyde_used=False, retrieval_transparency=[], pipeline_trace=[],
+        pipeline_stats={}, citation_status='not_applicable')
+
+
+def _blocked_chat(req, current_user, violation, persist=True):
+    from api.guardrails import INPUT_MESSAGE, OUTPUT_MESSAGE
+    session_id = req.session_id or str(uuid.uuid4())
+    message = INPUT_MESSAGE if violation.stage == 'input' else OUTPUT_MESSAGE
+    if violation.category == 'input_too_long':
+        message = 'Please keep your question under 8,000 characters.'
+    elif violation.category == 'empty_input':
+        message = 'Please enter a question.'
+    guardrail = {'blocked': True, 'stage': violation.stage, 'category': violation.category}
+    if persist and chat_history_service and current_user.user_id != 'anonymous':
+        chat_history_service.ensure_session(session_id, current_user.user_id, 'Safety check')
+        chat_history_service.add_message(session_id, current_user.user_id, role='user',
+            content='[Request blocked by safety checks.]' if violation.stage == 'input' else req.query)
+        chat_history_service.add_message(session_id, current_user.user_id, role='assistant',
+            content=message, confidence=0, retrieval_meta={'intent': 'SAFETY', 'guardrail': guardrail})
+    logger.info('Chat safety check blocked stage=%s category=%s', violation.stage, violation.category)
+    return ChatResponse(answer=message, citations=[], confidence=0, confidence_label='BLOCKED',
+        confidence_breakdown={}, chunks_used=0, low_confidence=True, latency_ms=0,
+        session_id=session_id, repositories_searched=[], expanded_queries=[], sub_queries=[],
+        intent='SAFETY', hyde_used=False, retrieval_transparency=[], pipeline_trace=[],
+        pipeline_stats={}, guardrail=guardrail)
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest, current_user: CurrentUser = Depends(get_current_user)):
+    from api.guardrails import check_input, check_output, safe_history, safe_metadata, GuardrailViolation
+    req = req.model_copy(update={'session_id': req.session_id or str(uuid.uuid4()),
+                                 'chat_history': safe_history(req.chat_history)})
+    try:
+        check_input(req.query)
+        from api.citation_policy import non_document_reply
+        if reply := non_document_reply(req.query):
+            return _non_document_chat(req, current_user, reply)
+        response = await _run_chat(req, current_user)
+    except GuardrailViolation as violation:
+        return _blocked_chat(req, current_user, violation)
+    try:
+        check_output(response.answer)
+    except GuardrailViolation as violation:
+        return _blocked_chat(req, current_user, violation, persist=False)
+    from api.citation_policy import apply_citation_policy
+    return ChatResponse.model_validate(safe_metadata(apply_citation_policy(response.model_dump(), req.query)))
+
+
+async def _run_chat(req: ChatRequest, current_user: CurrentUser):
     """
     Full LLD-compliant retrieval pipeline:
     QU(9 steps) → HyDE → Dense+Question+BM25 → RRF → CrossEncoder → Context → LLM
@@ -568,6 +627,8 @@ async def chat(req: ChatRequest, current_user: CurrentUser = Depends(get_current
         if exact_rows:
             latency_ms = int((time.time() - t_start) * 1000)
             answer = _format_ticket_answer(exact_rows)
+            from api.guardrails import check_output
+            check_output([answer, exact_rows])
             citations = [{
                 "source": "tickets.csv",
                 "ticket_id": t.get("ticket_id"),
@@ -652,6 +713,8 @@ async def chat(req: ChatRequest, current_user: CurrentUser = Depends(get_current
             count = _run_ticket_count_query(filters)
             label = _describe_ticket_filters(filters)
             answer = f"There are **{count}** {label}."
+            from api.guardrails import check_output
+            check_output(answer)
 
             query_ctx.pipeline_trace.append({
                 "step": "ticket_analytics_sql_agent",
@@ -945,6 +1008,9 @@ async def chat(req: ChatRequest, current_user: CurrentUser = Depends(get_current
         pass
 
     # ── Chat history persistence (per-user, exclusive sessions) ────────────────
+    from api.guardrails import check_output
+    check_output(llm_resp['answer'])
+
     if chat_history_service and chat_user_id:
         try:
             chat_history_service.ensure_session(session_id, chat_user_id, req.query)
@@ -1241,10 +1307,31 @@ class AgentChatResponse(BaseModel):
     steps: List[AgentStepOut]
     pattern: str
     session_id: str
+    guardrail: dict = {}
+    citation_status: str = 'grounded'
 
 
 @app.post("/agent/chat", response_model=AgentChatResponse)
 async def agent_chat(req: AgentChatRequest, current_user: CurrentUser = Depends(get_current_user)):
+    from api.guardrails import check_input, check_output, safe_history, GuardrailViolation, INPUT_MESSAGE, OUTPUT_MESSAGE
+    session_id = req.session_id or str(uuid.uuid4())
+    try:
+        check_input(req.query)
+        from api.citation_policy import non_document_reply, apply_citation_policy
+        if reply := non_document_reply(req.query):
+            return AgentChatResponse(answer=reply, citations=[], steps=[], pattern='out_of_scope',
+                session_id=session_id, citation_status='not_applicable')
+        response = await _run_agent_chat(req.model_copy(update={'session_id': session_id,
+            'chat_history': safe_history(req.chat_history)}), current_user)
+        check_output(response.model_dump())
+        return AgentChatResponse.model_validate(apply_citation_policy(response.model_dump(), req.query))
+    except GuardrailViolation as violation:
+        return AgentChatResponse(answer=INPUT_MESSAGE if violation.stage == 'input' else OUTPUT_MESSAGE,
+            citations=[], steps=[], pattern='safety', session_id=session_id,
+            guardrail={'blocked': True, 'stage': violation.stage, 'category': violation.category})
+
+
+async def _run_agent_chat(req: AgentChatRequest, current_user: CurrentUser):
     """
     ReAct loop over document_search / ticket_lookup / summarizer tools,
     with a deterministic Plan-Execute fallback if no local LLM is available.

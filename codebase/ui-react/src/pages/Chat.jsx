@@ -9,6 +9,7 @@ import {
 import { api } from '../services/api'
 import BundlePanel from '../components/BundlePanel'
 import ModelSelector from '../components/ModelSelector'
+import { citationHref, citationParts } from '../services/citations'
 import clsx from 'clsx'
 
 const REPO_COLORS = {
@@ -29,7 +30,6 @@ function docDisplayName(doc) {
 function PipelineTrace({ trace, stats, hydeUsed, subQueries, open, onToggle }) {
   if (!trace?.length) return null
 
-  const stepIcons = ['🔤','🛡️','🎯','🔍','📂','🔧','💡','🔀','✂️','📊']
   const stepColors = [
     'border-slate-600', 'border-blue-600', 'border-purple-600',
     'border-cyan-600', 'border-green-600', 'border-orange-600',
@@ -44,8 +44,8 @@ function PipelineTrace({ trace, stats, hydeUsed, subQueries, open, onToggle }) {
           <Activity size={12} />
           <span className="font-medium">Pipeline Trace</span>
           <span className="text-slate-600">— {trace.length} steps · dense={stats?.dense||0} q={stats?.question||0} sum={stats?.summary||0} bm25={stats?.bm25||0} → {stats?.final_chunks||0} final</span>
-          {hydeUsed && <span className="badge bg-yellow-500/15 text-yellow-400">HyDE ✓</span>}
-          {subQueries?.length > 1 && <span className="badge bg-pink-500/15 text-pink-400">decomposed ✓</span>}
+          {hydeUsed && <span className="badge bg-yellow-500/15 text-yellow-400">HyDE</span>}
+          {subQueries?.length > 1 && <span className="badge bg-pink-500/15 text-pink-400">decomposed</span>}
         </div>
         {open ? <ChevronUp size={12} className="text-slate-500" /> : <ChevronDown size={12} className="text-slate-500" />}
       </button>
@@ -54,7 +54,6 @@ function PipelineTrace({ trace, stats, hydeUsed, subQueries, open, onToggle }) {
           {trace.map((step, i) => (
             <div key={step.step} className={`border-l-2 pl-3 py-1 ${stepColors[i] || 'border-slate-600'}`}>
               <div className="flex items-center gap-2 mb-0.5">
-                <span className="text-xs">{stepIcons[i] || '•'}</span>
                 <span className="text-xs font-medium text-slate-300">Step {step.step}: {step.name}</span>
                 {step.confidence && (
                   <span className="badge bg-slate-700 text-slate-400">{(step.confidence*100).toFixed(0)}%</span>
@@ -69,7 +68,7 @@ function PipelineTrace({ trace, stats, hydeUsed, subQueries, open, onToggle }) {
                 {step.filters && Object.keys(step.filters).length > 0 && (
                   <div>filters: {JSON.stringify(step.filters)}</div>
                 )}
-                {step.pii_found && <div className="text-amber-500">⚠ PII detected: {step.types?.join(', ')}</div>}
+                {step.pii_found && <div className="text-amber-500">PII detected: {step.types?.join(', ')}</div>}
                 {step.signal_scores && Object.keys(step.signal_scores).length > 0 && (
                   <div>signals: {Object.entries(step.signal_scores).map(([k,v]) => `${k}=${(v*100).toFixed(0)}%`).join(', ')}</div>
                 )}
@@ -90,7 +89,7 @@ function PipelineTrace({ trace, stats, hydeUsed, subQueries, open, onToggle }) {
                       <div className="text-brand-400">mode: scoped document summary (similarity search skipped)</div>
                     )}
                     {step.scope_escaped && (
-                      <div className="text-amber-500">⚠ left your selected document/bundle scope — answered from {step.scope?.toLowerCase()} scope instead</div>
+                      <div className="text-amber-500">Left your selected document/bundle scope — answered from {step.scope?.toLowerCase()} scope instead</div>
                     )}
                     {step.chunks_per_document && Object.keys(step.chunks_per_document).length > 0 && (
                       <div>
@@ -119,17 +118,7 @@ function PipelineTrace({ trace, stats, hydeUsed, subQueries, open, onToggle }) {
 // ── Sources & Retrieval Detail ───────────────────────────────────────────────
 function SourcesPanel({ citations, transparency, reposSearched, expandedQueries }) {
   const [tab, setTab] = useState('citations')
-  const navigate = useNavigate()
   if (!citations?.length && !transparency?.length) return null
-
-  function openCitation(c) {
-    if (c.doc_type === 'Ticket') {
-      navigate(`/tickets?search=${encodeURIComponent(c.section || c.source)}`)
-    } else {
-      // Preview: open in new tab if we have a URL, else navigate to docs
-      navigate(`/documents?search=${encodeURIComponent(c.source)}`)
-    }
-  }
 
   return (
     <div className="mt-2 rounded-xl border border-slate-700/40 overflow-hidden text-xs">
@@ -143,8 +132,8 @@ function SourcesPanel({ citations, transparency, reposSearched, expandedQueries 
       </div>
       <div className="p-3 space-y-1.5 max-h-56 overflow-y-auto bg-slate-900/40">
         {tab === 'citations' && citations?.map((c,i) => (
-          <div key={i} onClick={() => openCitation(c)}
-            title={c.doc_type === 'Ticket' ? 'View in Tickets' : 'Preview Document'}
+          <a key={i} href={citationHref(c)} target="_blank" rel="noopener noreferrer"
+            title={c.doc_type === 'Ticket' ? 'View in Tickets' : 'Open source document in a new tab'}
             className="flex items-start gap-2 p-2 bg-slate-800/50 rounded-lg cursor-pointer hover:bg-slate-700/50 transition-colors">
             <div className="w-5 h-5 rounded flex items-center justify-center bg-brand-600/20 text-brand-400 font-bold text-[10px] flex-shrink-0">{i+1}</div>
             <div className="min-w-0 flex-1">
@@ -161,7 +150,7 @@ function SourcesPanel({ citations, transparency, reposSearched, expandedQueries 
               <div className="text-emerald-400 font-medium">{(c.score*100).toFixed(0)}%</div>
               <div className="text-slate-600 text-[10px]">Tier {c.priority_tier}</div>
             </div>
-          </div>
+          </a>
         ))}
 
         {tab === 'chunks' && transparency?.map((c,i) => (
@@ -278,9 +267,21 @@ function Message({ msg, sessionId, onToggleSources, onToggleTrace }) {
         <Brain size={14} className="text-brand-400" />
       </div>
       <div className="flex-1 max-w-2xl">
-        <div className="card px-4 py-3 text-sm text-slate-200 leading-relaxed whitespace-pre-wrap">{msg.content}</div>
+        <div className="card px-4 py-3 text-sm text-slate-200 leading-relaxed whitespace-pre-wrap">
+          {citationParts(msg.content, m.citations).map((part, index) => part.citation
+            ? <a key={index} href={citationHref(part.citation)} target="_blank" rel="noopener noreferrer"
+                title={`Open ${part.citation.source || 'source document'}${part.citation.page > 0 ? `, page ${part.citation.page}` : ''}`}
+                className="text-brand-300 underline underline-offset-2 hover:text-brand-200">{part.text}</a>
+            : part.text)}
+        </div>
+        {m.citations?.length > 0 && <div className="mt-2 flex flex-wrap gap-2 text-xs" aria-label="Source documents">
+          {m.citations.map((citation, index) => <a key={index} href={citationHref(citation)} target="_blank" rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 rounded-lg border border-slate-700/50 px-2 py-1 text-brand-300 hover:bg-slate-800"
+            title="Open source in a new tab"><FileText size={12} />[{index + 1}] {citation.source || 'Source'}{citation.page > 0 ? ` · p.${citation.page}` : ''}</a>)}
+        </div>}
 
-        {m.confidence !== undefined && (
+        {m.guardrail?.blocked && <div role="status" className="mt-2 text-xs text-amber-400">Safety check: {m.guardrail.stage === 'input' ? 'request' : 'response'} blocked</div>}
+        {m.confidence !== undefined && !m.guardrail?.blocked && (!m.citation_status || m.citation_status === 'grounded') && (
           <div className="flex items-center gap-2 mt-2 flex-wrap">
             <span className={`badge text-xs font-medium ${confClass}`}>
               <BarChart2 size={10} className="mr-1" />
@@ -442,6 +443,8 @@ export default function Chat() {
               intent: meta.intent,
               repositories_searched: meta.repositories_searched,
               low_confidence: meta.low_confidence,
+              guardrail: meta.guardrail,
+              citation_status: meta.citation_status,
               latency_ms: meta.latency_ms,
             },
           }
@@ -608,6 +611,8 @@ export default function Chat() {
           chunks_used: resp.chunks_used,
           latency_ms: resp.latency_ms,
           low_confidence: resp.low_confidence,
+          guardrail: resp.guardrail,
+          citation_status: resp.citation_status,
           pipeline_trace: resp.pipeline_trace,
           pipeline_stats: resp.pipeline_stats,
         },

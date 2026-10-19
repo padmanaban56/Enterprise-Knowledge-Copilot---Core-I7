@@ -21,6 +21,8 @@ import httpx
 import tiktoken
 
 from configs.settings import get_settings
+from api.guardrails import (check_input, check_output, safe_history, GuardrailViolation,
+                            OUTPUT_MESSAGE, INPUT_MESSAGE, SAFETY_INSTRUCTIONS)
 from retrieval.hybrid_engine import RetrievalResult, RetrievedChunk
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,8 @@ RULES:
 4. Be concise and professional. Use bullet points for step-by-step instructions.
 5. For IT issues, include actionable steps when available.
 6. Never guess or hallucinate. If unsure, say "Based on available documentation..."
+7. Cite documents only when they support a factual answer. If the requested information
+   is absent, give a brief explanation without [Source N] markers or a Sources footer.
 
 FORMAT:
 - Lead with the direct answer
@@ -74,6 +78,8 @@ _CLARIFICATION_TEMPLATES = [
     "I couldn't find confident information for that query. Could you be more specific? For example:\n- Which department or system are you asking about?\n- Is this related to a specific process or tool?\n- Do you have a ticket or incident number?",
     "I found some partial matches but need more context. Could you clarify:\n- What specific problem are you trying to solve?\n- What system or service is involved?\n- Is this urgent or blocking you?",
 ]
+
+_SYSTEM_PROMPT += SAFETY_INSTRUCTIONS
 
 
 def build_context(
@@ -137,6 +143,7 @@ class LLMService:
         chat_history: Optional[List[Dict]] = None,
     ) -> LLMResponse:
         """Non-streaming generation."""
+        check_input(query)
         chunks = list(retrieval_result.chunks)
 
         # Low confidence → clarification, no LLM call
@@ -181,6 +188,7 @@ class LLMService:
                 f"Model required: `ollama pull {self.model}`"
             )
 
+        check_output(answer)
         return LLMResponse(
             answer=answer,
             citations=citations,
@@ -199,55 +207,21 @@ class LLMService:
         Streaming generation. Yields SSE-compatible chunks.
         Usage: async for token in llm.stream_generate(...): send_sse(token)
         """
-        chunks = list(retrieval_result.chunks)
-
-        if retrieval_result.low_confidence or len(chunks) < 1:
-            q_idx = hash(query) % len(_CLARIFICATION_TEMPLATES)
-            yield json.dumps({"type": "clarification", "text": _CLARIFICATION_TEMPLATES[q_idx]})
-            return
-
-        context, citations = build_context(chunks)
-        prompt = self._build_prompt(query, context, chat_history)
-
-        # Yield citations metadata first
-        yield json.dumps({
-            "type": "citations",
-            "citations": [
-                {
-                    "source": c.source_file.split("/")[-1],
-                    "section": c.section_title,
-                    "page": c.page_number,
-                    "score": c.score,
-                }
-                for c in citations
-            ],
-            "confidence": round(retrieval_result.confidence, 3),
-        })
-
-        # Stream tokens
+        # Buffer the entire answer before releasing any text. Otherwise a slur
+        # split across token boundaries could reach the browser before checking.
         try:
-            async with httpx.AsyncClient(timeout=180.0) as client:
-                async with client.stream(
-                    "POST",
-                    f"{self.base_url}/api/generate",
-                    json={
-                        "model": self.model,
-                        "prompt": prompt,
-                        "system": _SYSTEM_PROMPT,
-                        "stream": True,
-                        "options": {"temperature": 0.1, "top_p": 0.9, "num_predict": 1024},
-                    },
-                ) as resp:
-                    async for line in resp.aiter_lines():
-                        if line:
-                            data = json.loads(line)
-                            token = data.get("response", "")
-                            if token:
-                                yield json.dumps({"type": "token", "text": token})
-                            if data.get("done"):
-                                yield json.dumps({"type": "done", "confidence": round(retrieval_result.confidence, 3)})
-                                break
-
+            result = await self.generate(query, retrieval_result, chat_history)
+            check_output([result.answer, [c.__dict__ for c in result.citations]])
+            yield json.dumps({"type": "citations", "citations": [
+                {"source": c.source_file.split('/')[-1], "section": c.section_title,
+                 "page": c.page_number, "score": c.score} for c in result.citations],
+                "confidence": round(result.confidence, 3)})
+            yield json.dumps({"type": "clarification" if result.low_confidence else "token", "text": result.answer})
+            yield json.dumps({"type": "done", "confidence": round(result.confidence, 3)})
+        except GuardrailViolation as violation:
+            yield json.dumps({"type": "token", "text": INPUT_MESSAGE if violation.stage == 'input' else OUTPUT_MESSAGE,
+                              "guardrail": {"blocked": True, "stage": violation.stage, "category": violation.category}})
+            yield json.dumps({"type": "done", "confidence": 0})
         except Exception as e:
             logger.error(f"Ollama streaming error: {e}")
             yield json.dumps({"type": "error", "text": "LLM unavailable. Is Ollama running?"})
@@ -261,7 +235,7 @@ class LLMService:
         """Build the full prompt with optional chat history."""
         history_text = ""
         if chat_history:
-            last_turns = [msg for msg in chat_history if msg.get('role') in ('user','assistant')][-4:]
+            last_turns = safe_history(chat_history)[-4:]
             history_parts = []
             for msg in last_turns:
                 role = "User" if msg["role"] == "user" else "Assistant"
@@ -292,6 +266,7 @@ class LLMService:
         context : pre-built context text with [Source N] labels
         citations: list of citation dicts from BuiltContext
         """
+        check_input(query)
         if is_low_confidence or not context.strip():
             from api.llm_service import _CLARIFICATION_TEMPLATES
             import random
@@ -302,6 +277,7 @@ class LLMService:
         if provider == "openrouter":
             from api.model_service import model_service
             answer = await model_service.complete(model, _SYSTEM_PROMPT, prompt)
+            check_output(answer)
             return {"answer": answer, "low_confidence": False}
         try:
             async with httpx.AsyncClient(timeout=180.0) as client:
@@ -331,6 +307,7 @@ class LLMService:
                 "LLM unavailable. Ensure Ollama is running: `ollama serve`\n"
                 f"Model required: `ollama pull {self.model}`"
             )
+        check_output(answer)
         return {"answer": answer, "low_confidence": False}
 
     async def check_ollama(self) -> bool:

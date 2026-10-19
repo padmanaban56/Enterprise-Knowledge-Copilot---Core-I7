@@ -262,13 +262,27 @@ class ChatHistoryService:
             return
         try:
             import json
+            from api.guardrails import output_category, safe_metadata, OUTPUT_MESSAGE
+            if role == 'assistant' and (category := output_category(content)):
+                content, citations, confidence = OUTPUT_MESSAGE, [], 0
+                retrieval_meta = {'intent': 'SAFETY', 'guardrail': {
+                    'blocked': True, 'stage': 'output', 'category': category}}
+            if role == 'assistant':
+                from api.citation_policy import apply_citation_policy
+                cited = apply_citation_policy({'answer': content, 'citations': citations})
+                if cited.get('citation_status'):
+                    content, citations, confidence = cited['answer'], [], 0
+                    retrieval_meta = {**(retrieval_meta or {}), 'citation_status': cited['citation_status']}
+                citations, retrieval_meta = safe_metadata(citations), safe_metadata(retrieval_meta)
             with self.engine.begin() as conn:
                 conn.execute(text(
                     "INSERT INTO chat_messages "
                     "(session_id, role, content, citations, confidence, retrieval_meta) "
-                    "VALUES (:sid, :role, :content, :citations, :confidence, :meta)"
+                    "SELECT :sid, :role, :content, :citations, :confidence, :meta "
+                    "WHERE EXISTS (SELECT 1 FROM chat_sessions WHERE session_id=:sid AND user_id=:uid)"
                 ), {
                     "sid": session_id,
+                    "uid": user_id,
                     "role": role,
                     "content": content,
                     "citations": json.dumps(citations or []),
@@ -309,4 +323,25 @@ class ChatHistoryService:
                 "FROM chat_messages WHERE session_id = :sid "
                 "ORDER BY created_at ASC, timeline_seq ASC"
             ), {"sid": session_id})
-            return [dict(r._mapping) for r in rows]
+            messages = [dict(r._mapping) for r in rows]
+            from api.guardrails import output_category, safe_metadata, OUTPUT_MESSAGE
+            from api.citation_policy import apply_citation_policy
+            last_query = None
+            for message in messages:
+                if message['role'] == 'user':
+                    last_query = message['content']
+                if message['role'] != 'assistant':
+                    continue
+                category = output_category(message['content'])
+                if category:
+                    message.update(content=OUTPUT_MESSAGE, citations=[], confidence=0,
+                        retrieval_meta={'intent': 'SAFETY', 'guardrail': {
+                            'blocked': True, 'stage': 'output', 'category': category}})
+                message['citations'] = safe_metadata(message.get('citations'))
+                message['retrieval_meta'] = safe_metadata(message.get('retrieval_meta'))
+                if not (message['retrieval_meta'] or {}).get('guardrail', {}).get('blocked'):
+                    cited = apply_citation_policy({'answer': message['content'], 'citations': message['citations']}, last_query)
+                    if cited.get('citation_status'):
+                        message.update(content=cited['answer'], citations=[], confidence=0,
+                            retrieval_meta={**(message['retrieval_meta'] or {}), 'citation_status': cited['citation_status']})
+            return messages

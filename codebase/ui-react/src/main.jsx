@@ -12,6 +12,7 @@ import Dashboard from './pages/Dashboard'
 import Repositories from './pages/Repositories'
 import Documents from './pages/Documents'
 import DocumentDetail from './pages/DocumentDetail'
+import DocumentSource from './pages/DocumentSource'
 import Tickets from './pages/Tickets'
 import Chat from './pages/Chat'
 import Admin from './pages/Admin'
@@ -39,6 +40,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
             <Route path="/repositories" element={<Repositories />} />
             <Route path="/documents" element={<Documents />} />
             <Route path="/documents/:docId" element={<DocumentDetail />} />
+            <Route path="/sources/document" element={<DocumentSource />} />
             <Route path="/tickets" element={<Tickets />} />
             <Route path="/chat" element={<Chat />} />
             <Route path="/admin" element={<Admin />} />
