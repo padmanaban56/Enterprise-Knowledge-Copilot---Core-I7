@@ -3,6 +3,7 @@ configs/settings.py  —  Central configuration via pydantic-settings
 """
 from functools import lru_cache
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import SecretStr
 
 
 class Settings(BaseSettings):
@@ -32,6 +33,7 @@ class Settings(BaseSettings):
     # LLM
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "phi3:mini"
+    openrouter_api_key: SecretStr = SecretStr("")
     # P6: Level-2 LLM intent classifier model. qwen2.5:3b preferred (better
     # instruction following for classification); falls back to phi3:mini.
     intent_classifier_model: str = "qwen2.5:3b"
@@ -54,6 +56,7 @@ class Settings(BaseSettings):
     # Embeddings
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     embedding_dim: int = 384  # bge-small; change to 1024 for bge-large
+    embedding_batch_size: int = 8  # Limit CPU inference memory on laptops
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     # App

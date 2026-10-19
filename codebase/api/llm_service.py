@@ -261,7 +261,7 @@ class LLMService:
         """Build the full prompt with optional chat history."""
         history_text = ""
         if chat_history:
-            last_turns = chat_history[-4:]  # last 2 exchanges
+            last_turns = [msg for msg in chat_history if msg.get('role') in ('user','assistant')][-4:]
             history_parts = []
             for msg in last_turns:
                 role = "User" if msg["role"] == "user" else "Assistant"
@@ -284,6 +284,8 @@ class LLMService:
         citations: List[Dict],
         is_low_confidence: bool,
         chat_history: Optional[List[Dict]] = None,
+        provider: str = "ollama",
+        model: Optional[str] = None,
     ) -> Dict:
         """
         Called by the new pipeline after Context Builder has assembled the window.
@@ -297,12 +299,16 @@ class LLMService:
             return {"answer": msg, "low_confidence": True}
 
         prompt = self._build_prompt(query, context, chat_history)
+        if provider == "openrouter":
+            from api.model_service import model_service
+            answer = await model_service.complete(model, _SYSTEM_PROMPT, prompt)
+            return {"answer": answer, "low_confidence": False}
         try:
             async with httpx.AsyncClient(timeout=180.0) as client:
                 resp = await client.post(
                     f"{self.base_url}/api/generate",
                     json={
-                        "model": self.model,
+                        "model": model or self.model,
                         "prompt": prompt,
                         "system": _SYSTEM_PROMPT,
                         "stream": False,

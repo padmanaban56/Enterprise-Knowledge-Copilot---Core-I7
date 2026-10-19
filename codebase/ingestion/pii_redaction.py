@@ -195,8 +195,21 @@ def _get_presidio():
     _presidio_checked = True
     try:
         from presidio_analyzer import AnalyzerEngine
+        from presidio_analyzer.nlp_engine import NlpEngineProvider
         from presidio_anonymizer import AnonymizerEngine
-        _presidio_analyzer = AnalyzerEngine()
+        import spacy
+
+        # Never download a model while handling an upload. Use the small
+        # English model installed during setup, with the existing regex
+        # fallback when it is unavailable.
+        model = "en_core_web_sm"
+        if not spacy.util.is_package(model):
+            raise RuntimeError(f"{model} is not installed")
+        engine = NlpEngineProvider(nlp_configuration={
+            "nlp_engine_name": "spacy",
+            "models": [{"lang_code": "en", "model_name": model}],
+        }).create_engine()
+        _presidio_analyzer = AnalyzerEngine(nlp_engine=engine, supported_languages=["en"])
         _presidio_anonymizer = AnonymizerEngine()
         logger.info("Presidio analyzer/anonymizer loaded for NER-based PII detection")
     except Exception as e:

@@ -795,6 +795,9 @@ class HybridRetrievalEngine:
         top_k: int = None,
         rbac_roles: Optional[List[str]] = None,
     ) -> RetrievalResult:
+        # The direct-document fallback uses this limit too; retrieve() only
+        # normalizes its own local copy and cannot supply the default here.
+        top_k = top_k or settings.reranker_top_k
         levels_tried: List[Dict[str, Any]] = []
 
         # ── Level 1: selected document(s), if any ──────────────────────────────

@@ -402,6 +402,17 @@ class QueryUnderstanding:
                 return ctx
 
             previous_intent = ctx.intent
+            # An LLM label alone must not send unrelated numeric questions
+            # (leave days, working hours, etc.) to COUNT(*) over tickets.
+            if label == "TICKET_ANALYTICS" and not re.search(
+                r"\b(tickets?|incidents?)\b", query, re.IGNORECASE
+            ):
+                ctx.pipeline_trace[2]["llm_classifier"] = {
+                    "model": settings.intent_classifier_model,
+                    "raw_response": raw[:80], "applied": False,
+                    "reason": "missing_ticket_context",
+                }
+                return ctx
             ctx.intent = label
             ctx.intent_confidence = 0.75
             ctx.needs_clarification = False

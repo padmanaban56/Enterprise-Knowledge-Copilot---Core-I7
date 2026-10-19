@@ -240,7 +240,9 @@ class ChatHistoryService:
                 conn.execute(text(
                     "INSERT INTO chat_sessions (session_id, user_id, title) "
                     "VALUES (:sid, :uid, :title) "
-                    "ON CONFLICT (session_id) DO UPDATE SET updated_at = NOW()"
+                    "ON CONFLICT (session_id) DO UPDATE SET updated_at = NOW(), "
+                    "title = CASE WHEN chat_sessions.title='New Chat' THEN EXCLUDED.title ELSE chat_sessions.title END "
+                    "WHERE chat_sessions.user_id=EXCLUDED.user_id"
                 ), {"sid": session_id, "uid": user_id, "title": title})
         except Exception as e:
             logger.warning(f"ensure_session failed: {e}")
@@ -305,6 +307,6 @@ class ChatHistoryService:
                 "SELECT message_id, role, content, citations, confidence, "
                 "retrieval_meta, created_at "
                 "FROM chat_messages WHERE session_id = :sid "
-                "ORDER BY created_at ASC"
+                "ORDER BY created_at ASC, timeline_seq ASC"
             ), {"sid": session_id})
             return [dict(r._mapping) for r in rows]

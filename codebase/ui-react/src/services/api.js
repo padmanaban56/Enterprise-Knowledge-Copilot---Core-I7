@@ -36,6 +36,7 @@ export const api = {
 
   // ── Chat ────────────────────────────────────────────────────────────────────
   chat: (body) => request('/chat', { method: 'POST', body: JSON.stringify(body) }),
+  getModels: () => request('/models'),
   agentChat: (body) => request('/agent/chat', { method: 'POST', body: JSON.stringify(body) }),
 
   // ── Repositories ────────────────────────────────────────────────────────────
@@ -125,6 +126,7 @@ export const api = {
   // ── Chat History ─────────────────────────────────────────────────────────────
   listChatSessions: () => request('/chat/sessions'),
   getChatSessionMessages: (sessionId) => request(`/chat/sessions/${sessionId}/messages`),
+  updateChatContext: (sessionId, body) => request(`/chat/sessions/${sessionId}/context`, { method: 'POST', body: JSON.stringify(body) }),
 
   // ── Access Requests ───────────────────────────────────────────────────────────
   myAccessRequests: () => request('/access-requests'),

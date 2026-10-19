@@ -25,13 +25,14 @@ import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional, Literal
 
 import psycopg2
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from api.model_service import model_service
 
 from configs.settings import get_settings
 from ingestion.idp_pipeline import (
@@ -184,15 +185,25 @@ app.add_middleware(
 # ── Routers (v4: Bundles, Help Center, Admin) ─────────────────────────────────
 from api.bundles_help_admin import router as bundles_help_admin_router
 app.include_router(bundles_help_admin_router, tags=["bundles", "help-center", "admin"])
+from api.chat_context_service import router as chat_context_router
+app.include_router(chat_context_router, tags=["chat"])
 
 
 # ════════════════════════════════════════════════════════════════════════════
 # AUTH ENDPOINTS (LLD §7.1 Authentication Layer)
+
 # ════════════════════════════════════════════════════════════════════════════
 from api.auth import (
     CurrentUser, LoginRequest, SSOCallbackRequest, TokenResponse,
     get_auth_service, get_current_user, issue_token, verify_password, require_roles,
 )
+
+
+@app.get("/models")
+async def available_models(user: CurrentUser = Depends(get_current_user)):
+    if user.user_id == "anonymous":
+        raise HTTPException(401, "Sign in to view available models")
+    return await model_service.list_models()
 
 # ── User management request models ───────────────────────────────────────────
 class ChangePasswordRequest(BaseModel):
@@ -401,6 +412,8 @@ async def clear_knowledge_base(req: ClearKnowledgeBaseRequest, current_user: Cur
 
 class ChatRequest(BaseModel):
     query: str
+    provider: Literal["ollama", "openrouter"] = "ollama"
+    model: Optional[str] = Field(default=None, max_length=200)
     session_id: Optional[str] = None
     chat_history: Optional[List[dict]] = None
     department_filter: Optional[str] = None
@@ -441,6 +454,9 @@ async def chat(req: ChatRequest, current_user: CurrentUser = Depends(get_current
     QU(9 steps) → HyDE → Dense+Question+BM25 → RRF → CrossEncoder → Context → LLM
     """
     import time
+    if req.provider == "openrouter" and current_user.user_id == "anonymous":
+        raise HTTPException(401, "Sign in to use OpenRouter models")
+    await model_service.validate(req.provider, req.model)
     t_start = time.time()
     session_id = req.session_id or str(uuid.uuid4())
     # RBAC: prefer authenticated user's access_roles (LLD §7); fall back to
@@ -828,6 +844,8 @@ async def chat(req: ChatRequest, current_user: CurrentUser = Depends(get_current
             citations=built_ctx.citations,
             is_low_confidence=result.low_confidence,
             chat_history=req.chat_history,
+            provider=req.provider,
+            model=req.model,
         )
 
     # ── Scope-escape notice ──────────────────────────────────────────────────
@@ -1035,7 +1053,11 @@ async def get_chat_session_messages(session_id: str, current_user: CurrentUser =
     messages = chat_history_service.get_session_messages(session_id, current_user.user_id)
     if messages is None:
         raise HTTPException(status_code=404, detail="Session not found")
-    return {"session_id": session_id, "messages": messages}
+    with chat_history_service.engine.connect() as conn:
+        from sqlalchemy import text as sql_text
+        context_state = conn.execute(sql_text('SELECT context_state FROM chat_sessions WHERE session_id=:sid AND user_id=:uid'),
+                                     {'sid':session_id,'uid':current_user.user_id}).scalar()
+    return {"session_id": session_id, "messages": messages, "context_state": context_state}
 
 
 def _tickets_to_chunks(tickets: List[dict], limit: int = 3) -> List[RetrievedChunk]:
@@ -1432,9 +1454,9 @@ async def _run_ticket_ingest_job(job_id: str, content: bytes, filename: str):
             description = _get_col(row, "description", lower_row)
             priority = _get_col(row, "priority", lower_row) or "Medium"
             category = _get_col(row, "category", lower_row) or "General"
-            email = _get_col(row, "requesterEmail", lower_row)
-            created_at_raw = _get_col(row, "createdAt", lower_row)
-            resolved_at_raw = _get_col(row, "resolvedAt", lower_row)
+            email = _get_col(row, "requester_email", lower_row)
+            created_at_raw = _get_col(row, "created_at", lower_row)
+            resolved_at_raw = _get_col(row, "resolved_at", lower_row)
 
             resolution = (_get_col(row, "resolution", lower_row) or "").strip()
             resolution = resolution if resolution else None

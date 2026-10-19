@@ -85,7 +85,7 @@ class EmbeddingService:
             return np.array([])
         return self.model.encode(
             texts,
-            batch_size=32,
+            batch_size=max(1, settings.embedding_batch_size),
             show_progress_bar=len(texts) > 50,
             normalize_embeddings=True,  # cosine similarity via dot product
         )

@@ -44,13 +44,39 @@ class BundleService:
     def __init__(self, db_url: str):
         self.engine = create_engine(db_url)
 
+    @staticmethod
+    def _lock_user(conn, user_id: str) -> None:
+        # Serialize content checks and writes, including concurrent requests.
+        conn.execute(text("SELECT user_id FROM users WHERE user_id = :uid FOR UPDATE"),
+                     {"uid": user_id})
+
+    @staticmethod
+    def _reject_matching_documents(conn, user_id: str, document_ids: List[str],
+                                   exclude_bundle_id: Optional[str] = None) -> None:
+        rows = conn.execute(
+            text("SELECT bundle_id, name, document_ids FROM bundles "
+                 "WHERE user_id = :uid AND deleted_at IS NULL ORDER BY created_at, bundle_id"),
+            {"uid": user_id},
+        ).fetchall()
+        selected = set(document_ids)
+        for row in rows:
+            bundle = row._mapping
+            if exclude_bundle_id is not None and str(bundle["bundle_id"]) == str(exclude_bundle_id):
+                continue
+            if set(bundle["document_ids"] or []) == selected:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f'These documents are already in bundle "{bundle["name"]}". '
+                           'Use that bundle or change the selected documents.',
+                )
+
     # ── GET /bundles ─────────────────────────────────────────────────────────
     def list_bundles(self, user_id: str) -> List[dict]:
         with self.engine.connect() as conn:
             rows = conn.execute(
                 text(
                     "SELECT bundle_id, name, document_ids, pinned, created_at, updated_at "
-                    "FROM bundles WHERE user_id = :uid "
+                    "FROM bundles WHERE user_id = :uid AND deleted_at IS NULL "
                     "ORDER BY pinned DESC, created_at DESC"
                 ),
                 {"uid": user_id},
@@ -63,7 +89,7 @@ class BundleService:
             rows = conn.execute(
                 text(
                     "SELECT bundle_id, name, document_ids, pinned, created_at, updated_at "
-                    "FROM bundles WHERE user_id = :uid AND name ILIKE :q "
+                    "FROM bundles WHERE user_id = :uid AND deleted_at IS NULL AND name ILIKE :q "
                     "ORDER BY pinned DESC, created_at DESC"
                 ),
                 {"uid": user_id, "q": f"%{q}%"},
@@ -76,7 +102,7 @@ class BundleService:
             row = conn.execute(
                 text(
                     "SELECT bundle_id, name, document_ids, pinned, created_at, updated_at "
-                    "FROM bundles WHERE bundle_id = :bid AND user_id = :uid"
+                    "FROM bundles WHERE bundle_id = :bid AND user_id = :uid AND deleted_at IS NULL"
                 ),
                 {"bid": bundle_id, "uid": user_id},
             ).fetchone()
@@ -89,15 +115,19 @@ class BundleService:
             raise HTTPException(status_code=400, detail="Bundle name cannot be empty")
         try:
             with self.engine.begin() as conn:
+                self._lock_user(conn, user_id)
+                self._reject_matching_documents(conn, user_id, document_ids)
                 row = conn.execute(
                     text(
                         "INSERT INTO bundles (user_id, name, document_ids) "
                         "VALUES (:uid, :name, :docs) "
                         "RETURNING bundle_id, name, document_ids, pinned, created_at, updated_at"
                     ),
-                    {"uid": user_id, "name": name.strip(), "docs": document_ids},
+                    {"uid": user_id, "name": name.strip(), "docs": list(dict.fromkeys(document_ids))},
                 ).fetchone()
                 return dict(row._mapping)
+        except HTTPException:
+            raise
         except Exception as e:
             if "unique" in str(e).lower() or "duplicate" in str(e).lower():
                 raise HTTPException(status_code=409, detail="A bundle with this name already exists")
@@ -108,26 +138,33 @@ class BundleService:
         self, user_id: str, bundle_id: str,
         name: Optional[str] = None, document_ids: Optional[List[str]] = None,
     ) -> dict:
-        existing = self.get_bundle(user_id, bundle_id)
-        if existing is None:
-            raise HTTPException(status_code=404, detail="Bundle not found")
-
         if name is not None and not name.strip():
             raise HTTPException(status_code=400, detail="Bundle name cannot be empty")
 
-        new_name = name.strip() if name is not None else existing["name"]
-        new_docs = document_ids if document_ids is not None else existing["document_ids"]
-
         try:
             with self.engine.begin() as conn:
+                self._lock_user(conn, user_id)
+                existing_row = conn.execute(
+                    text("SELECT name, document_ids FROM bundles "
+                         "WHERE bundle_id = :bid AND user_id = :uid AND deleted_at IS NULL"),
+                    {"bid": bundle_id, "uid": user_id},
+                ).fetchone()
+                if existing_row is None:
+                    raise HTTPException(status_code=404, detail="Bundle not found")
+                existing = existing_row._mapping
+                new_name = name.strip() if name is not None else existing["name"]
+                new_docs = list(dict.fromkeys(document_ids)) if document_ids is not None else existing["document_ids"]
+                self._reject_matching_documents(conn, user_id, new_docs, bundle_id)
                 row = conn.execute(
                     text(
                         "UPDATE bundles SET name = :name, document_ids = :docs, updated_at = NOW() "
-                        "WHERE bundle_id = :bid AND user_id = :uid "
+                        "WHERE bundle_id = :bid AND user_id = :uid AND deleted_at IS NULL "
                         "RETURNING bundle_id, name, document_ids, pinned, created_at, updated_at"
                     ),
                     {"name": new_name, "docs": new_docs, "bid": bundle_id, "uid": user_id},
                 ).fetchone()
+                if row is None:
+                    raise HTTPException(status_code=404, detail="Bundle not found")
                 return dict(row._mapping)
         except HTTPException:
             raise
@@ -142,7 +179,7 @@ class BundleService:
             row = conn.execute(
                 text(
                     "UPDATE bundles SET pinned = :pinned, updated_at = NOW() "
-                    "WHERE bundle_id = :bid AND user_id = :uid "
+                    "WHERE bundle_id = :bid AND user_id = :uid AND deleted_at IS NULL "
                     "RETURNING bundle_id, name, document_ids, pinned, created_at, updated_at"
                 ),
                 {"pinned": pinned, "bid": bundle_id, "uid": user_id},
@@ -176,7 +213,8 @@ class BundleService:
     def delete_bundle(self, user_id: str, bundle_id: str) -> None:
         with self.engine.begin() as conn:
             result = conn.execute(
-                text("DELETE FROM bundles WHERE bundle_id = :bid AND user_id = :uid"),
+                text("UPDATE bundles SET deleted_at = NOW(), updated_at = NOW() "
+                     "WHERE bundle_id = :bid AND user_id = :uid AND deleted_at IS NULL"),
                 {"bid": bundle_id, "uid": user_id},
             )
             if result.rowcount == 0:
@@ -283,7 +321,7 @@ def get_help_service() -> HelpCenterService:
 # 6.3 BUNDLE ENDPOINTS
 # ════════════════════════════════════════════════════════════════════════════
 class BundleUpdateRequest(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(default=None, max_length=255)
     document_ids: Optional[List[str]] = None
 
 
@@ -296,29 +334,35 @@ class BundleApplyRequest(BaseModel):
 
 
 class BundleCreateRequest(BaseModel):
-    name: str
+    name: str = Field(max_length=255)
     document_ids: List[str] = Field(default_factory=list)
 
 
+def require_bundle_user(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+    if user.user_id == "anonymous":
+        raise HTTPException(status_code=401, detail="Sign in to manage bundles")
+    return user
+
+
 @router.get("/bundles")
-async def list_bundles(user: CurrentUser = Depends(get_current_user)):
+async def list_bundles(user: CurrentUser = Depends(require_bundle_user)):
     return get_bundle_service().list_bundles(user.user_id)
 
 
 @router.get("/bundles/search")
-async def search_bundles(q: str, user: CurrentUser = Depends(get_current_user)):
+async def search_bundles(q: str, user: CurrentUser = Depends(require_bundle_user)):
     if not q or not q.strip():
         raise HTTPException(status_code=400, detail="Query parameter 'q' is required")
     return get_bundle_service().search_bundles(user.user_id, q.strip())
 
 
 @router.post("/bundles")
-async def create_bundle(req: BundleCreateRequest, user: CurrentUser = Depends(get_current_user)):
+async def create_bundle(req: BundleCreateRequest, user: CurrentUser = Depends(require_bundle_user)):
     return get_bundle_service().create_bundle(user.user_id, req.name, req.document_ids)
 
 
 @router.get("/bundles/{bundle_id}")
-async def get_bundle(bundle_id: str, user: CurrentUser = Depends(get_current_user)):
+async def get_bundle(bundle_id: str, user: CurrentUser = Depends(require_bundle_user)):
     bundle = get_bundle_service().get_bundle(user.user_id, bundle_id)
     if bundle is None:
         raise HTTPException(status_code=404, detail="Bundle not found")
@@ -327,7 +371,7 @@ async def get_bundle(bundle_id: str, user: CurrentUser = Depends(get_current_use
 
 @router.patch("/bundles/{bundle_id}")
 async def update_bundle(
-    bundle_id: str, req: BundleUpdateRequest, user: CurrentUser = Depends(get_current_user),
+    bundle_id: str, req: BundleUpdateRequest, user: CurrentUser = Depends(require_bundle_user),
 ):
     if req.name is None and req.document_ids is None:
         raise HTTPException(status_code=400, detail="At least one of 'name' or 'document_ids' is required")
@@ -336,14 +380,14 @@ async def update_bundle(
 
 @router.patch("/bundles/{bundle_id}/pin")
 async def pin_bundle(
-    bundle_id: str, req: BundlePinRequest, user: CurrentUser = Depends(get_current_user),
+    bundle_id: str, req: BundlePinRequest, user: CurrentUser = Depends(require_bundle_user),
 ):
     return get_bundle_service().set_pin(user.user_id, bundle_id, req.pinned)
 
 
 @router.post("/bundles/{bundle_id}/apply")
 async def apply_bundle(
-    bundle_id: str, req: BundleApplyRequest, user: CurrentUser = Depends(get_current_user),
+    bundle_id: str, req: BundleApplyRequest, user: CurrentUser = Depends(require_bundle_user),
 ):
     if not req.chat_id:
         raise HTTPException(status_code=400, detail="chat_id is required")
@@ -351,7 +395,7 @@ async def apply_bundle(
 
 
 @router.delete("/bundles/{bundle_id}")
-async def delete_bundle(bundle_id: str, user: CurrentUser = Depends(get_current_user)):
+async def delete_bundle(bundle_id: str, user: CurrentUser = Depends(require_bundle_user)):
     get_bundle_service().delete_bundle(user.user_id, bundle_id)
     return {"status": "deleted", "bundle_id": bundle_id}
 

@@ -130,6 +130,9 @@ python scripts/migrate_v5.py
 
 Get-Content ingestion/migration_v6.sql | docker exec -i postgres-ekc psql -U postgres -d enterprise_copilot
 
+python scripts/migrate_v7.py
+python scripts/migrate_v8.py
+
 python fix_password.py
 ```
 You should see:

@@ -8,6 +8,12 @@ venv/
 ENV/
 env/
 .env
+.env.*
+!.env.example
+
+# Local databases and runtime logs
+postgres-local/
+*.log
 
 # Application uploads and temporary files
 codebase/data/uploads/*

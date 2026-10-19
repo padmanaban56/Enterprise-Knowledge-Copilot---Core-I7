@@ -7,6 +7,8 @@ import {
   FolderOpen, FileText, CheckSquare
 } from 'lucide-react'
 import { api } from '../services/api'
+import BundlePanel from '../components/BundlePanel'
+import ModelSelector from '../components/ModelSelector'
 import clsx from 'clsx'
 
 const REPO_COLORS = {
@@ -246,6 +248,13 @@ function FeedbackRow({ msg, sessionId, onFeedback }) {
 // FIX: showSources & showTrace are stored in the message object (lifted state)
 // so they don't reset when navigating away and back to the chat tab.
 function Message({ msg, sessionId, onToggleSources, onToggleTrace }) {
+  if (msg.role === 'event') return (
+    <div role="note" className="flex items-center gap-3 py-1 text-xs text-slate-500">
+      <span className="flex-1 border-t border-slate-700/40" />
+      <span className="max-w-[85%] text-center break-words">{msg.content}</span>
+      <span className="flex-1 border-t border-slate-700/40" />
+    </div>
+  )
   const isUser = msg.role === 'user'
 
   if (isUser) return (
@@ -335,6 +344,12 @@ export default function Chat() {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('ekc-answer-model') ?? 'ollama|phi3:mini')
+  function selectModel(value) {
+    if (loading || loadingHistory) return
+    applyContext({ ...selectionRef.current, model: value })
+    localStorage.setItem('ekc-answer-model', value)
+  }
   const [sessionId, setSessionId] = useState(() => searchParams.get('session') || crypto.randomUUID())
   const [historyOpen, setHistoryOpen] = useState(true)
   const [sessions, setSessions] = useState([])
@@ -348,9 +363,53 @@ export default function Chat() {
   const [expandedRepo, setExpandedRepo] = useState(null)
   const [selectedDocIds, setSelectedDocIds] = useState([]) // [{docId, filename, repo}]
   const [bundles, setBundles] = useState([])
+  const [bundleError, setBundleError] = useState('')
   const [selectedBundleIds, setSelectedBundleIds] = useState([])
 
   const bottomRef = useRef(null)
+  const contextQueue = useRef(Promise.resolve())
+  const currentSession = useRef(sessionId)
+  const selectionRef = useRef(null)
+  selectionRef.current = { model: selectedModel, docs: selectedDocIds, bundleIds: selectedBundleIds }
+  const [contextError, setContextError] = useState('')
+
+  function persistContext(next) {
+    const sid = currentSession.current
+    const request = {
+      request_id: crypto.randomUUID(),
+      provider: next.model ? next.model.split('|')[0] : null,
+      model: next.model ? next.model.split('|')[1] : null,
+      document_ids: next.docs.map(doc => doc.docId), bundle_ids: [...next.bundleIds],
+    }
+    const job = contextQueue.current.catch(() => {}).then(async () => {
+      const result = await api.updateChatContext(sid, request)
+      if (currentSession.current !== sid) return
+      const events = result.messages.map(message => ({
+        role: 'event', content: message.content, messageId: message.message_id,
+        meta: message.retrieval_meta, createdAt: message.created_at,
+      }))
+      setMessages(previous => {
+        const known = new Set(previous.map(message => message.messageId).filter(Boolean))
+        return [...previous, ...events.filter(message => !known.has(message.messageId))]
+      })
+      setContextError('')
+      setSearchParams({ session: sid })
+      refreshSessions()
+      return result
+    })
+    contextQueue.current = job
+    job.catch(error => { if (currentSession.current === sid) setContextError(error.message) })
+    return job
+  }
+
+  function applyContext(next) {
+    if (loading || loadingHistory) return
+    selectionRef.current = next
+    setSelectedModel(next.model)
+    setSelectedDocIds(next.docs)
+    setSelectedBundleIds(next.bundleIds)
+    persistContext(next)
+  }
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -369,6 +428,7 @@ export default function Chat() {
     try {
       const res = await api.getChatSessionMessages(sid)
       const loaded = res.messages.map(m => {
+        if (m.role === 'event') return { role: 'event', content: m.content, messageId: m.message_id, meta: m.retrieval_meta, createdAt: m.created_at }
         if (m.role === 'assistant') {
           const meta = m.retrieval_meta || {}
           return {
@@ -389,6 +449,17 @@ export default function Chat() {
         return { role: 'user', content: m.content }
       })
       setMessages(loaded)
+      currentSession.current = sid
+      contextQueue.current = Promise.resolve()
+      setContextError('')
+      const state = res.context_state
+      const next = {
+        model: state ? (state.model ? `${state.provider}|${state.model}` : '') : selectionRef.current.model,
+        docs: (state?.documents || []).map(doc => ({ docId: doc.doc_id, filename: doc.filename, repo: doc.repository })),
+        bundleIds: state?.bundle_ids || [],
+      }
+      selectionRef.current = next
+      setSelectedModel(next.model); setSelectedDocIds(next.docs); setSelectedBundleIds(next.bundleIds)
       setSessionId(sid)
       setSearchParams({ session: sid })
     } catch (e) {
@@ -411,10 +482,12 @@ export default function Chat() {
 
   const refreshBundles = useCallback(async () => {
     try {
-      const res = await api.listBundles()
+      const res = await api.getBundles()
       setBundles(res || [])
-    } catch {
-      setBundles([])
+      if (selectionRef.current?.bundleIds.length) persistContext(selectionRef.current)
+      setBundleError('')
+    } catch (err) {
+      setBundleError(err.message || 'Unable to load bundles')
     }
   }, [])
 
@@ -442,30 +515,32 @@ export default function Chat() {
 
   function toggleDocSelection(doc, repoName) {
     const key = doc.doc_id || doc.id
-    setSelectedDocIds(prev => {
-      const exists = prev.find(d => d.docId === key)
-      if (exists) return prev.filter(d => d.docId !== key)
-      return [...prev, { docId: key, filename: docDisplayName(doc), repo: repoName }]
-    })
+    const prev = selectionRef.current
+    const exists = prev.docs.some(item => item.docId === key)
+    applyContext({ ...prev, docs: exists ? prev.docs.filter(item => item.docId !== key)
+      : [...prev.docs, { docId: key, filename: docDisplayName(doc), repo: repoName }] })
   }
 
   function toggleBundleSelection(bundleId) {
-    setSelectedBundleIds(prev =>
-      prev.includes(bundleId) ? prev.filter(id => id !== bundleId) : [...prev, bundleId]
-    )
+    const prev = selectionRef.current
+    applyContext({ ...prev, bundleIds: prev.bundleIds.includes(bundleId)
+      ? prev.bundleIds.filter(id => id !== bundleId) : [...prev.bundleIds, bundleId] })
   }
 
   function clearScope() {
-    setSelectedDocIds([])
-    setSelectedBundleIds([])
+    applyContext({ ...selectionRef.current, docs: [], bundleIds: [] })
   }
 
   function startNewChat() {
+    currentSession.current = crypto.randomUUID()
+    contextQueue.current = Promise.resolve()
+    setContextError('')
     setMessages([])
-    setSessionId(crypto.randomUUID())
+    setSessionId(currentSession.current)
     setSearchParams({})
     setHistoryOpen(false)
-    clearScope()
+    setSelectedDocIds([]); setSelectedBundleIds([])
+    selectionRef.current = { model: selectedModel, docs: [], bundleIds: [] }
   }
 
   function groupSessionsByDate(list) {
@@ -490,30 +565,28 @@ export default function Chat() {
     if (!q || loading) return
     setInput('')
     const userMsg = { role: 'user', content: q }
-    setMessages(prev => [...prev, userMsg])
     setLoading(true)
 
     try {
-      const history = messages.slice(-6).map(m => ({ role: m.role, content: m.content }))
+      const saved = await persistContext(selectionRef.current)
+      if (currentSession.current !== sessionId) return
+      setMessages(prev => [...prev, userMsg])
+      const history = messages.filter(m => m.role === 'user' || m.role === 'assistant').slice(-6).map(m => ({ role: m.role, content: m.content }))
 
       // Build scope: selected doc IDs + doc IDs from selected bundles
-      const bundleDocIds = selectedBundleIds.flatMap(bid => {
-        const b = bundles.find(x => x.bundle_id === bid)
-        return b?.document_ids || []
-      })
-      const scopeDocIds = [...new Set([
-        ...selectedDocIds.map(d => d.docId),
-        ...bundleDocIds,
-      ])]
+      const scopeDocIds = saved.context_state.effective_documents.map(doc => doc.doc_id)
 
       const body = {
         query: q,
+        provider: saved.context_state.provider || 'ollama',
+        model: saved.context_state.model,
         session_id: sessionId,
         chat_history: history,
         ...(scopeDocIds.length > 0 ? { document_ids: scopeDocIds } : {}),
       }
 
       const resp = await api.chat(body)
+      if (currentSession.current !== sessionId) return
 
       const assistantMsg = {
         role: 'assistant',
@@ -546,6 +619,7 @@ export default function Chat() {
       }
       refreshSessions()
     } catch (err) {
+      if (currentSession.current !== sessionId) return
       console.error('Chat error:', err)
       setMessages(prev => [...prev, {
         role: 'assistant',
@@ -556,7 +630,7 @@ export default function Chat() {
     } finally {
       setLoading(false)
     }
-  }, [input, loading, messages, sessionId, searchParams, setSearchParams, refreshSessions, selectedDocIds, selectedBundleIds, bundles])
+  }, [input, loading, messages, sessionId, searchParams, setSearchParams, refreshSessions, selectedDocIds, selectedBundleIds, bundles, selectedModel])
 
   useEffect(() => {
     const sid = searchParams.get('session')
@@ -637,11 +711,12 @@ export default function Chat() {
               <span className="ml-2 text-xs px-2 py-0.5 rounded-full border bg-brand-600/15 text-brand-300 border-brand-500/30 flex items-center gap-1">
                 <CheckSquare size={10} />
                 {totalScopeCount} item{totalScopeCount > 1 ? 's' : ''} scoped
-                <button onClick={clearScope} className="ml-1 hover:text-white"><X size={10} /></button>
+                <button disabled={loading || loadingHistory} onClick={clearScope} className="ml-1 hover:text-white"><X size={10} /></button>
               </span>
             )}
           </div>
           <div className="flex items-center gap-2">
+            <ModelSelector value={selectedModel} onChange={selectModel} disabled={loading || loadingHistory} />
             {messages.length > 0 && (
               <button className="btn-ghost text-xs" onClick={startNewChat}>Clear</button>
             )}
@@ -692,7 +767,7 @@ export default function Chat() {
             {selectedDocIds.map(d => (
               <span key={d.docId} className="text-xs px-2 py-1 bg-brand-600/10 text-brand-300 border border-brand-500/20 rounded-lg flex items-center gap-1">
                 <FileText size={10} />{d.filename}
-                <button onClick={() => setSelectedDocIds(p => p.filter(x => x.docId !== d.docId))}
+                <button disabled={loading} onClick={() => toggleDocSelection({ doc_id: d.docId, source_file: d.filename }, d.repo)}
                   className="ml-0.5 hover:text-white"><X size={9} /></button>
               </span>
             ))}
@@ -701,7 +776,7 @@ export default function Chat() {
               return (
                 <span key={bid} className="text-xs px-2 py-1 bg-indigo-600/10 text-indigo-300 border border-indigo-500/20 rounded-lg flex items-center gap-1">
                   <Package size={10} />{b?.name || 'Bundle'}
-                  <button onClick={() => setSelectedBundleIds(p => p.filter(id => id !== bid))}
+                  <button disabled={loading} onClick={() => toggleBundleSelection(bid)}
                     className="ml-0.5 hover:text-white"><X size={9} /></button>
                 </span>
               )
@@ -710,6 +785,9 @@ export default function Chat() {
         )}
 
         {/* Input */}
+        {contextError && <div role="alert" className="px-5 py-2 text-xs text-red-400">Context changes could not be saved: {contextError}
+          <button className="ml-2 underline" onClick={() => persistContext(selectionRef.current)}>Retry</button>
+        </div>}
         <div className="flex-shrink-0 px-5 py-4 border-t border-slate-700/50 bg-[#0f1520]">
           <div className="flex gap-3 items-end">
             <textarea
@@ -777,7 +855,7 @@ export default function Chat() {
                         const isSelected = selectedDocIds.find(d => d.docId === key)
                         return (
                           <label key={key} className="flex items-center gap-1.5 px-1.5 py-1 rounded-md hover:bg-slate-700/30 cursor-pointer">
-                            <input type="checkbox" checked={!!isSelected}
+                            <input type="checkbox" checked={!!isSelected} disabled={loading || loadingHistory}
                               onChange={() => toggleDocSelection(doc, repo.name)}
                               className="rounded border-slate-600 bg-slate-800 text-brand-500 focus:ring-0 h-3 w-3" />
                             <FileText size={10} className="text-slate-600 flex-shrink-0" />
@@ -793,39 +871,16 @@ export default function Chat() {
           )}
 
           {sidebarTab === 'bundles' && (
-            <>
-              <div className="px-2 py-1.5 text-xs text-slate-600">Select bundles to scope your query</div>
-              {bundles.length === 0 ? (
-                <div className="px-2 py-3 text-xs text-slate-600 text-center">
-                  No bundles yet. Select documents in the Documents page and save them as a bundle.
-                </div>
-              ) : bundles.map(b => {
-                const isSelected = selectedBundleIds.includes(b.bundle_id)
-                return (
-                  <div key={b.bundle_id}
-                    className={clsx(
-                      'group flex items-center justify-between gap-1 px-2.5 py-2 rounded-lg mb-0.5 cursor-pointer transition-colors',
-                      isSelected ? 'bg-brand-600/15 text-brand-300' : 'hover:bg-slate-700/30 text-slate-300'
-                    )}
-                    onClick={() => toggleBundleSelection(b.bundle_id)}
-                  >
-                    <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                      <input type="checkbox" checked={isSelected} onChange={() => {}} readOnly
-                        className="rounded border-slate-600 bg-slate-800 text-brand-500 focus:ring-0 h-3 w-3 flex-shrink-0" />
-                      <Package size={12} className="flex-shrink-0 text-slate-500" />
-                      <div className="text-xs truncate">{b.name}</div>
-                    </div>
-                    <span className="text-xs text-slate-600 flex-shrink-0">({(b.document_ids || []).length})</span>
-                  </div>
-                )
-              })}
-            </>
+            <BundlePanel bundles={bundles} selectedIds={selectedBundleIds}
+              disabled={loading || loadingHistory}
+              onToggle={toggleBundleSelection} onRefresh={refreshBundles}
+              initialDocumentIds={selectedDocIds.map(doc => doc.docId)} loadError={bundleError} />
           )}
         </div>
 
         {hasScope && (
           <div className="flex-shrink-0 border-t border-slate-700/50 px-3 py-2">
-            <button onClick={clearScope} className="btn-ghost text-xs w-full justify-center text-slate-500">
+            <button disabled={loading || loadingHistory} onClick={clearScope} className="btn-ghost text-xs w-full justify-center text-slate-500">
               <X size={12} /> Clear scope
             </button>
           </div>

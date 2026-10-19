@@ -9,6 +9,8 @@ Phase 1 implements:
 """
 from __future__ import annotations
 
+from configs.settings import get_settings
+
 import hashlib
 import logging
 import re
@@ -794,7 +796,7 @@ Document:
         async with httpx.AsyncClient(timeout=30.0) as client:
 
             resp = await client.post(
-                "http://localhost:11434/api/generate",
+                f"{get_settings().ollama_base_url.rstrip('/')}/api/generate",
                 json={
                     "model": ollama_model,
                     "prompt": prompt,
@@ -899,7 +901,7 @@ Chunk:
         async with httpx.AsyncClient(timeout=20.0) as client:
 
             resp = await client.post(
-                "http://localhost:11434/api/generate",
+                f"{get_settings().ollama_base_url.rstrip('/')}/api/generate",
                 json={
                     "model": ollama_model,
                     "prompt": prompt,
