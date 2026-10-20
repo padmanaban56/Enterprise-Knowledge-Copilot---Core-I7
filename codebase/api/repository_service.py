@@ -155,7 +155,7 @@ class RepositoryService:
         return result[:5]  # max 5 queries
 
     # ── Repository CRUD ────────────────────────────────────────────────────────
-    def get_all(self) -> List[Dict]:
+    def get_all(self, user_roles: Optional[List[str]] = None) -> List[Dict]:
         """Get all repositories with stats.
 
         Document/chunk counts are computed live from the `documents` table
@@ -166,6 +166,7 @@ class RepositoryService:
         in the DB). Computing live keeps Repositories, Dashboard, and the
         Chat repo picker in sync with what's actually in `documents`.
         """
+        from api.access_control import DOCUMENT_VISIBLE, REPOSITORY_VISIBLE, access_parameters
         with self.engine.connect() as conn:
             rows = conn.execute(text(
                 "SELECT r.repository_id, r.name, r.display_name, r.description, "
@@ -174,11 +175,12 @@ class RepositoryService:
                 "COALESCE(SUM(d.chunk_count), 0) AS chunk_count, "
                 "r.last_updated "
                 "FROM repositories r "
-                "LEFT JOIN documents d ON d.repository_id = r.repository_id "
+                f"LEFT JOIN documents d ON d.repository_id = r.repository_id AND {DOCUMENT_VISIBLE} "
+                f"WHERE {REPOSITORY_VISIBLE} "
                 "GROUP BY r.repository_id, r.name, r.display_name, r.description, "
                 "r.color, r.icon, r.last_updated "
                 "ORDER BY r.name"
-            ))
+            ), access_parameters(user_roles))
             return [dict(r._mapping) for r in rows]
 
     def get_by_name(self, name: str) -> Optional[Dict]:
@@ -211,16 +213,18 @@ class RepositoryService:
             ))
             conn.commit()
 
-    def get_documents(self, repository_name: str, limit: int = 50) -> List[Dict]:
+    def get_documents(self, repository_name: str, limit: int = 50,
+                      user_roles: Optional[List[str]] = None) -> List[Dict]:
         """Get documents belonging to a repository."""
+        from api.access_control import DOCUMENT_VISIBLE, access_parameters
         with self.engine.connect() as conn:
             rows = conn.execute(text(
                 "SELECT d.doc_id, d.title, d.source_file, d.doc_type, "
                 "d.doc_origin, d.chunk_count, d.access_roles, d.ingested_at "
                 "FROM documents d "
                 "JOIN repositories r ON d.repository_id = r.repository_id "
-                "WHERE r.name = :name "
+                f"WHERE r.name = :name AND {DOCUMENT_VISIBLE} "
                 "ORDER BY d.ingested_at DESC "
                 "LIMIT :limit"
-            ), {"name": repository_name, "limit": limit})
+            ), {"name": repository_name, "limit": limit, **access_parameters(user_roles)})
             return [dict(r._mapping) for r in rows]

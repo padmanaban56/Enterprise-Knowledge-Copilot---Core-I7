@@ -47,7 +47,6 @@ export default function Dashboard() {
   const { user } = useAuth()
   const [metrics, setMetrics] = useState(null)
   const [repos, setRepos] = useState([])
-  const [accessRequestCount, setAccessRequestCount] = useState(0)
   const [loading, setLoading] = useState(true)
   const [days, setDays] = useState(7)
 
@@ -59,17 +58,20 @@ export default function Dashboard() {
   const isAdmin = ADMIN_ROLES.some(r => userRoles.has(r))
 
   useEffect(() => {
-    const fetches = [api.dashboardMetrics(days), api.getRepositories()]
-    if (!isAdmin) fetches.push(api.myAccessRequests().catch(() => []))
-    Promise.all(fetches)
-      .then(([m, r, reqs]) => {
+    let active = true
+    setLoading(true)
+    setMetrics(null)
+    setRepos([])
+    Promise.all([api.dashboardMetrics(days), api.getRepositories()])
+      .then(([m, r]) => {
+        if (!active) return
         setMetrics(m)
         setRepos(r.repositories || [])
-        if (reqs) setAccessRequestCount(reqs.length || 0)
       })
       .catch(console.error)
-      .finally(() => setLoading(false))
-  }, [days])
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [days, user?.user_id])
 
   if (loading) return (
     <div className="flex items-center justify-center h-full">
@@ -87,14 +89,6 @@ export default function Dashboard() {
     confidence: +(d.avg_conf * 100).toFixed(1),
   })) || []
 
-  // Repositories filtered by user access when not admin
-  const visibleRepos = isAdmin
-    ? repos
-    : repos.filter(repo => {
-        const userAccessRoles = (user?.access_roles || []).map(r => r.toUpperCase())
-        return userAccessRoles.includes(repo.name?.toUpperCase()) || userAccessRoles.includes('EMPLOYEE')
-      })
-
   return (
     <div className="p-6 space-y-6 animate-fade-in">
       {/* Warm greeting hero */}
@@ -105,9 +99,7 @@ export default function Dashboard() {
             {getGreeting()}, {user?.username?.split(' ')[0] || 'there'}!
           </h1>
           <p className="text-blue-200 text-sm max-w-lg leading-relaxed">
-            {isAdmin
-              ? 'Here\'s an overview of your Enterprise Knowledge Platform. Manage documents, users, and analytics from here.'
-              : 'Search across your company\'s knowledge base. Ask anything — policies, procedures, documentation.'}
+            Your activity and the knowledge you can access. Search policies, procedures, and documentation.
           </p>
           <div className="mt-5 flex items-center gap-3">
             <button
@@ -128,7 +120,7 @@ export default function Dashboard() {
 
       {/* Period selector */}
       <div className="flex items-center justify-between">
-        <div className="text-sm font-medium text-slate-400">Overview</div>
+        <div className="text-sm font-medium text-slate-400">My Overview</div>
         <div className="flex gap-1">
           {[7, 14, 30].map(d => (
             <button key={d} onClick={() => setDays(d)}
@@ -141,34 +133,28 @@ export default function Dashboard() {
 
       {/* KPI row 1 */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard icon={FileText} label="Documents Indexed" value={metrics?.total_documents ?? '—'} color="brand" />
-        <StatCard icon={Database} label="Chunks Indexed" value={(metrics?.total_chunks ?? 0).toLocaleString()} color="blue" />
-        <StatCard icon={Ticket} label="Tickets Indexed" value={(metrics?.total_tickets ?? 0).toLocaleString()} color="amber" />
-        <StatCard icon={FolderOpen} label="Repositories" value={metrics?.total_repositories ?? 6} color="green" />
+        <StatCard icon={FileText} label="Accessible Documents" value={metrics?.total_documents ?? '—'} color="brand" />
+        <StatCard icon={Database} label="Accessible Chunks" value={(metrics?.total_chunks ?? 0).toLocaleString()} color="blue" />
+        <StatCard icon={Ticket} label="My Tickets" value={(metrics?.total_tickets ?? 0).toLocaleString()} sub="Requested by me" color="amber" />
+        <StatCard icon={FolderOpen} label="Accessible Repositories" value={metrics?.total_repositories ?? 0} color="green" />
       </div>
 
-      {/* KPI row 2 — admin sees all-user stats; regular users see their personal stats */}
+      {/* Personal metrics for every signed-in user, including administrators. */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard icon={TrendingUp} label={isAdmin ? 'Total Queries' : 'My Queries'} value={metrics?.total_queries ?? 0} sub={`Last ${days} days`} />
-        <StatCard icon={BarChart3} label="Avg Confidence"
+        <StatCard icon={TrendingUp} label="My Queries" value={metrics?.total_queries ?? 0} sub={`Last ${days} days`} />
+        <StatCard icon={BarChart3} label="My Avg Confidence"
           value={`${((metrics?.avg_confidence ?? 0) * 100).toFixed(0)}%`}
           sub={metrics?.avg_confidence >= 0.65 ? '🟢 Good' : '🟡 Review'} />
-        <StatCard icon={Clock} label="Avg Latency" value={`${metrics?.avg_latency_ms ?? 0}ms`} color="amber" />
-        {isAdmin ? (
-          <StatCard icon={ShieldCheck} label="Access Requests"
-            value={metrics?.access_request_count ?? '—'}
-            color={metrics?.access_request_count > 0 ? 'amber' : 'green'} />
-        ) : (
-          <StatCard icon={ShieldCheck} label="My Access Requests"
-            value={accessRequestCount}
-            color={accessRequestCount > 0 ? 'amber' : 'green'} />
-        )}
+        <StatCard icon={Clock} label="My Avg Latency" value={`${metrics?.avg_latency_ms ?? 0}ms`} color="amber" />
+        <StatCard icon={ShieldCheck} label="My Pending Access Requests"
+          value={metrics?.access_request_count ?? 0}
+          color={metrics?.access_request_count > 0 ? 'amber' : 'green'} />
       </div>
 
       {/* Charts row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="card p-5">
-          <div className="text-sm font-medium text-slate-300 mb-4">Query Volume (last {days} days)</div>
+          <div className="text-sm font-medium text-slate-300 mb-4">My Query Volume (last {days} days)</div>
           {dailyData.length > 0 ? (
             <ResponsiveContainer width="100%" height={200}>
               <BarChart data={dailyData}>
@@ -183,7 +169,7 @@ export default function Dashboard() {
         </div>
 
         <div className="card p-5">
-          <div className="text-sm font-medium text-slate-300 mb-4">Query Intent Distribution</div>
+          <div className="text-sm font-medium text-slate-300 mb-4">My Query Intent Distribution</div>
           {intentData.length > 0 ? (
             <div className="flex items-center gap-4">
               <ResponsiveContainer width="50%" height={180}>
@@ -217,7 +203,7 @@ export default function Dashboard() {
           Knowledge Repositories {!isAdmin && <span className="text-slate-600 font-normal">— your accessible repos</span>}
         </div>
         <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
-          {(isAdmin ? repos : visibleRepos).map(repo => (
+          {repos.map(repo => (
             <div key={repo.name} className="card-hover p-4 cursor-pointer"
               onClick={() => navigate(`/repositories`)}>
               <div className="flex items-start justify-between mb-3">
@@ -247,7 +233,7 @@ export default function Dashboard() {
       {metrics?.recent_queries?.length > 0 && (
         <div>
           <div className="text-sm font-medium text-slate-300 mb-3">
-            {isAdmin ? 'Recent Queries (All Users)' : 'My Recent Queries'}
+            My Recent Queries
           </div>
           <div className="card overflow-hidden">
             <table className="w-full text-sm">

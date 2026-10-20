@@ -93,8 +93,7 @@ export default function Login() {
           </form>
 
           <p className="text-xs text-slate-600 text-center mt-5">
-            Demo credentials: <span className="text-slate-400">demo@company.com</span> /{' '}
-            <span className="text-slate-400">password123</span>
+            Use the department account assigned by your administrator.
           </p>
         </div>
 

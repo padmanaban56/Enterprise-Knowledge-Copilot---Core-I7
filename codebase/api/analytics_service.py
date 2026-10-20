@@ -67,9 +67,15 @@ class AnalyticsService:
         except Exception as e:
             logger.warning(f"Analytics log failed: {e}")
 
-    def get_dashboard_metrics(self, days: int = 7, user_id: Optional[str] = None) -> Dict:
-        """Aggregate metrics for the dashboard."""
+    def get_dashboard_metrics(self, days: int = 7, *, user_id: str,
+                              user_roles: Optional[List[str]] = None, user_email: Optional[str] = None) -> Dict:
+        """Personal activity plus the signed-in user's accessible knowledge totals."""
+        if not user_id or user_id == 'anonymous':
+            raise ValueError('A signed-in user is required for dashboard metrics')
+        from api.access_control import DOCUMENT_VISIBLE, REPOSITORY_VISIBLE, access_parameters
         since = datetime.utcnow() - timedelta(days=days)
+        activity_params = {'since': since, 'uid': user_id}
+        visibility_params = access_parameters(user_roles)
         try:
             with self.engine.connect() as conn:
                 # Overall stats
@@ -79,70 +85,63 @@ class AnalyticsService:
                     "AVG(latency_ms) as avg_latency, "
                     "AVG(chunks_retrieved) as avg_chunks, "
                     "SUM(CASE WHEN low_confidence THEN 1 ELSE 0 END) as low_conf_count "
-                    "FROM retrieval_analytics WHERE timestamp > :since"
-                ), {"since": since}).fetchone()
+                    "FROM retrieval_analytics WHERE timestamp > :since AND user_id = :uid"
+                ), activity_params).fetchone()
 
                 # Repository usage
                 repo_usage = conn.execute(text(
                     "SELECT unnest(repositories_searched) as repo, COUNT(*) as queries "
-                    "FROM retrieval_analytics WHERE timestamp > :since "
+                    "FROM retrieval_analytics WHERE timestamp > :since AND user_id = :uid "
                     "GROUP BY repo ORDER BY queries DESC"
-                ), {"since": since})
+                ), activity_params)
                 repo_data = [dict(r._mapping) for r in repo_usage]
 
                 # Queries over time (daily buckets)
                 daily = conn.execute(text(
                     "SELECT DATE(timestamp) as day, COUNT(*) as queries, "
                     "AVG(confidence) as avg_conf "
-                    "FROM retrieval_analytics WHERE timestamp > :since "
+                    "FROM retrieval_analytics WHERE timestamp > :since AND user_id = :uid "
                     "GROUP BY DATE(timestamp) ORDER BY day"
-                ), {"since": since})
+                ), activity_params)
                 daily_data = [dict(r._mapping) for r in daily]
 
                 # Intent distribution
                 intents = conn.execute(text(
                     "SELECT intent, COUNT(*) as count "
-                    "FROM retrieval_analytics WHERE timestamp > :since "
+                    "FROM retrieval_analytics WHERE timestamp > :since AND user_id = :uid "
                     "GROUP BY intent ORDER BY count DESC"
-                ), {"since": since})
+                ), activity_params)
                 intent_data = [dict(r._mapping) for r in intents]
 
-                # Top queries (scoped to user if provided)
-                if user_id:
-                    top_queries = conn.execute(text(
-                        "SELECT query_text, confidence, latency_ms, timestamp, session_id "
-                        "FROM retrieval_analytics WHERE timestamp > :since AND user_id = :uid "
-                        "ORDER BY timestamp DESC LIMIT 10"
-                    ), {"since": since, "uid": user_id})
-                else:
-                    top_queries = conn.execute(text(
-                        "SELECT query_text, confidence, latency_ms, timestamp, session_id "
-                        "FROM retrieval_analytics WHERE timestamp > :since "
-                        "ORDER BY timestamp DESC LIMIT 10"
-                    ), {"since": since})
+                top_queries = conn.execute(text(
+                    "SELECT query_text, confidence, latency_ms, timestamp, session_id "
+                    "FROM retrieval_analytics WHERE timestamp > :since AND user_id = :uid "
+                    "ORDER BY timestamp DESC LIMIT 10"
+                ), activity_params)
                 recent_queries = [dict(r._mapping) for r in top_queries]
 
                 # Document and chunk counts
                 doc_counts = conn.execute(text(
                     "SELECT COUNT(*) as docs, "
                     "COALESCE(SUM(chunk_count), 0) as chunks "
-                    "FROM documents WHERE status = 'READY'"
-                )).fetchone()
+                    f"FROM documents d WHERE d.status = 'READY' AND {DOCUMENT_VISIBLE}"
+                ), visibility_params).fetchone()
 
-                ticket_count = conn.execute(text("SELECT COUNT(*) FROM tickets")).scalar() or 0
-                repo_count = conn.execute(text("SELECT COUNT(*) FROM repositories")).scalar() or 0
+                ticket_count = conn.execute(text(
+                    "SELECT COUNT(*) FROM tickets WHERE :email <> '' AND LOWER(requester_email) = LOWER(:email)"
+                ), {'email': user_email or ''}).scalar() or 0
+                repo_count = conn.execute(text(
+                    f"SELECT COUNT(*) FROM repositories r WHERE {REPOSITORY_VISIBLE}"
+                ), visibility_params).scalar() or 0
 
-                # Access request count (pending) — useful for admin home card
-                try:
-                    access_request_count = conn.execute(
-                        text("SELECT COUNT(*) FROM access_requests WHERE status = 'pending'")
-                    ).scalar() or 0
-                except Exception:
-                    access_request_count = 0
+                access_request_count = conn.execute(text(
+                    "SELECT COUNT(*) FROM access_requests WHERE status = 'pending' AND user_id = :uid"
+                ), {'uid': user_id}).scalar() or 0
 
                 s = dict(stats._mapping) if stats else {}
                 return {
                     "period_days": days,
+                    "scope": "user",
                     "total_queries": int(s.get("total_queries") or 0),
                     "avg_confidence": round(float(s.get("avg_confidence") or 0), 3),
                     "avg_latency_ms": round(float(s.get("avg_latency") or 0)),
@@ -163,12 +162,7 @@ class AnalyticsService:
                 }
         except Exception as e:
             logger.error(f"Analytics fetch failed: {e}")
-            return {
-                "error": str(e),
-                "total_queries": 0, "avg_confidence": 0,
-                "avg_latency_ms": 0, "total_documents": 0,
-                "total_chunks": 0, "total_tickets": 0, "total_repositories": 6,
-            }
+            raise RuntimeError('Dashboard metrics are temporarily unavailable') from e
 
     def get_evaluation_metrics(self) -> Dict:
         """

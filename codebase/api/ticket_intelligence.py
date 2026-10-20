@@ -17,6 +17,7 @@ from typing import Dict, List, Optional
 from sqlalchemy import create_engine, text
 
 from configs.settings import get_settings
+from api.access_control import access_parameters, TICKET_VISIBLE
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -31,7 +32,7 @@ class TicketIntelligence:
     def __init__(self, db_url: Optional[str] = None):
         self.engine = create_engine(db_url or settings.postgres_url)
 
-    def find_known_issue(self, query: str, category: str = None) -> Optional[Dict]:
+    def find_known_issue(self, query: str, category: str = None, *, user_roles=None) -> Optional[Dict]:
         """
         Check if query matches a known recurring issue.
         Returns the most common resolution if found.
@@ -47,11 +48,12 @@ class TicketIntelligence:
                 "SELECT ticket_id, subject, description, resolution, priority, category, status "
                 "FROM tickets "
                 "WHERE fts_vector @@ plainto_tsquery('english', :query) "
+                + f"AND {TICKET_VISIBLE} "
                 + ("AND category = :cat " if category else "")
                 + "ORDER BY ts_rank(fts_vector, plainto_tsquery('english', :query)) DESC "
                 "LIMIT 20"
             )
-            params = {"query": " ".join(symptoms)}
+            params = {"query": " ".join(symptoms), **access_parameters(user_roles)}
             if category:
                 params["cat"] = category
 
@@ -90,14 +92,15 @@ class TicketIntelligence:
             "priorities": self._count_priorities(rows),
         }
 
-    def get_resolution_stats(self, category: str) -> Dict:
+    def get_resolution_stats(self, category: str, *, user_roles=None) -> Dict:
         """Get resolution statistics for a ticket category."""
         with self.engine.connect() as conn:
             rows = conn.execute(text(
                 "SELECT status, COUNT(*) as count "
                 "FROM tickets WHERE category = :cat "
+                f"AND {TICKET_VISIBLE} "
                 "GROUP BY status"
-            ), {"cat": category})
+            ), {"cat": category, **access_parameters(user_roles)})
             status_counts = {r.status: r.count for r in rows}
 
             total = sum(status_counts.values())
@@ -117,6 +120,7 @@ class TicketIntelligence:
         category: str = None,
         priority: str = None,
         limit: int = 10,
+        *, user_roles=None,
     ) -> Dict:
         """
         Enhanced ticket search: FTS + intelligence overlay.
@@ -129,8 +133,9 @@ class TicketIntelligence:
                 "ts_rank(fts_vector, plainto_tsquery('english', :q)) as rank "
                 "FROM tickets "
                 "WHERE fts_vector @@ plainto_tsquery('english', :q) "
+                f"AND {TICKET_VISIBLE} "
             )
-            params = {"q": query, "limit": limit}
+            params = {"q": query, "limit": limit, **access_parameters(user_roles)}
             filters = []
             if category:
                 filters.append("AND category = :cat")
@@ -143,7 +148,7 @@ class TicketIntelligence:
             tickets = [dict(r._mapping) for r in conn.execute(sql, params)]
 
         # Overlay known issue intelligence
-        known_issue = self.find_known_issue(query, category)
+        known_issue = self.find_known_issue(query, category, user_roles=user_roles)
 
         return {
             "tickets": tickets,
@@ -152,34 +157,34 @@ class TicketIntelligence:
             "query": query,
         }
 
-    def get_recent_tickets(self, limit: int = 10, category: str = None) -> List[Dict]:
+    def get_recent_tickets(self, limit: int = 10, category: str = None, *, user_roles=None) -> List[Dict]:
         """Get most recent tickets, optionally filtered by category."""
         with self.engine.connect() as conn:
             if category:
                 rows = conn.execute(text(
                     "SELECT ticket_id, subject, priority, category, status, created_at "
-                    "FROM tickets WHERE category = :cat ORDER BY created_at DESC LIMIT :limit"
-                ), {"cat": category, "limit": limit})
+                    f"FROM tickets WHERE category = :cat AND {TICKET_VISIBLE} ORDER BY created_at DESC LIMIT :limit"
+                ), {"cat": category, "limit": limit, **access_parameters(user_roles)})
             else:
                 rows = conn.execute(text(
                     "SELECT ticket_id, subject, priority, category, status, created_at "
-                    "FROM tickets ORDER BY created_at DESC LIMIT :limit"
-                ), {"limit": limit})
+                    f"FROM tickets WHERE {TICKET_VISIBLE} ORDER BY created_at DESC LIMIT :limit"
+                ), {"limit": limit, **access_parameters(user_roles)})
             return [dict(r._mapping) for r in rows]
 
-    def get_category_breakdown(self) -> List[Dict]:
+    def get_category_breakdown(self, *, user_roles=None) -> List[Dict]:
         """Aggregate ticket counts by category for dashboard."""
         with self.engine.connect() as conn:
             rows = conn.execute(text(
                 "SELECT category, COUNT(*) as total, "
                 "SUM(CASE WHEN status IN ('resolved','closed') THEN 1 ELSE 0 END) as resolved "
-                "FROM tickets GROUP BY category ORDER BY total DESC LIMIT 10"
-            ))
+                f"FROM tickets WHERE {TICKET_VISIBLE} GROUP BY category ORDER BY total DESC LIMIT 10"
+            ), access_parameters(user_roles))
             return [dict(r._mapping) for r in rows]
 
-    def get_total_count(self) -> int:
+    def get_total_count(self, *, user_roles=None) -> int:
         with self.engine.connect() as conn:
-            result = conn.execute(text("SELECT COUNT(*) FROM tickets"))
+            result = conn.execute(text(f"SELECT COUNT(*) FROM tickets WHERE {TICKET_VISIBLE}"), access_parameters(user_roles))
             return result.scalar() or 0
 
     # ── Private helpers ────────────────────────────────────────────────────────

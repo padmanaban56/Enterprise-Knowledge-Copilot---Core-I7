@@ -1,0 +1,76 @@
+flowchart TB
+    U[Employees and administrators]
+    UI["React portal · Vite · Tailwind<br/>Chat, documents, repositories, tickets, dashboard, admin<br/>localhost:3000"]
+    SHARE["Optional remote access<br/>Cloudflare HTTPS tunnel → password-protected gateway :3001"]
+    U --> UI
+    U -. remote access .-> SHARE
+    SHARE -. serves frontend .-> UI
+
+    subgraph BACKEND["Python application · FastAPI / Uvicorn · :8000"]
+        API["API routes<br/>JWT authentication · role and repository access checks"]
+        CHAT["Chat coordinator<br/>Input safety · conversation context · document / bundle scope"]
+        QU["Query understanding<br/>Normalize · PII scrub · intent / entities<br/>Repository routing · filters · expansion · decomposition"]
+        RET["Hybrid retrieval<br/>BGE query embeddings · conditional HyDE<br/>Internal-first search with full-corpus fallback<br/>Dense content + question + summary + BM25"]
+        RANK["Ranking and context<br/>Reciprocal Rank Fusion → cross-encoder reranking<br/>Priority · freshness · feedback boosts · context budget"]
+        ANSWER["Answer service<br/>Grounded generation · citations · confidence<br/>Output safety and citation policy"]
+        AGENT["Optional ReAct agent<br/>Document search · ticket lookup · summarizer"]
+        ING["Background ingestion jobs<br/>PDF / DOCX / PPTX parsing · classification<br/>Chunking · PII hashing · LLM enrichment<br/>Embedded images: OCR / vision captions"]
+        EMB["Embedding service<br/>BGE-small-en-v1.5 · 384 dimensions"]
+        BM["In-memory BM25 index"]
+        TICKET["Ticket intelligence<br/>CSV import · exact / SQL / semantic lookup<br/>Known issues and resolution mining"]
+        OPS["Application services<br/>Repositories · bundles · chat history · access requests<br/>Analytics · evaluation · feedback · knowledge gaps"]
+        API --> CHAT --> QU --> RET --> RANK --> ANSWER
+        API --> AGENT
+        AGENT --> RET
+        AGENT --> TICKET
+        API --> ING --> EMB
+        API --> TICKET
+        API --> OPS
+        RET --> EMB
+        RET --> BM
+        ING --> BM
+        CHAT --> TICKET
+        ANSWER --> OPS
+        OPS -. feedback boosts .-> RANK
+    end
+
+    UI <-->|"/api proxy · JSON / streaming responses"| API
+    SHARE -. forwards API requests .-> API
+
+    subgraph DATA["Local persistence"]
+        QD[("Qdrant · :6333<br/>enterprise_knowledge<br/>content / summary / question / keyword vectors<br/>Chunk payloads and access metadata")]
+        PG[("PostgreSQL · local :55432<br/>Users / roles · documents · tickets · bundles<br/>Sessions · analytics · feedback · audit records")]
+        REDIS[("Redis · :6379<br/>BM25 corpus persistence<br/>Embedding cache")]
+        FILES[("Filesystem<br/>Original uploads · extracted images")]
+    end
+
+    EMB -->|ingestion vectors| QD
+    RET <-->|vector search with access filters| QD
+    BM <-->|save / restore corpus| REDIS
+    EMB <-->|cache| REDIS
+    ING -->|metadata and PII audit records| PG
+    ING --> FILES
+    TICKET <--> PG
+    TICKET -->|semantic search| QD
+    OPS <--> PG
+    API <-->|authentication and access data| PG
+    API -->|authorized source downloads| FILES
+
+    OLLAMA["Local Ollama · local :11435<br/>Answer generation · HyDE · enrichment<br/>Intent classification · optional vision"]
+    OR["Optional OpenRouter API<br/>Selected free answer model<br/>Requires server configuration"]
+    ANSWER --> OLLAMA
+    ANSWER -. selected provider .-> OR
+    QU --> OLLAMA
+    RET -->|HyDE| OLLAMA
+    ING --> OLLAMA
+    AGENT --> OLLAMA
+    ANSWER -->|answer, sources, confidence and trace| UI
+
+    classDef client fill:#e0f2fe,stroke:#0284c7,color:#0c4a6e
+    classDef service fill:#eef2ff,stroke:#6366f1,color:#312e81
+    classDef store fill:#ecfdf5,stroke:#10b981,color:#064e3b
+    classDef model fill:#fff7ed,stroke:#f97316,color:#7c2d12
+    class U,UI,SHARE client
+    class API,CHAT,QU,RET,RANK,ANSWER,AGENT,ING,EMB,BM,TICKET,OPS service
+    class QD,PG,REDIS,FILES store
+    class OLLAMA,OR model

@@ -1,0 +1,22 @@
+Generated with the built-in image generation tool.
+
+Create a premium enterprise software architecture infographic, landscape 16:9, white background, crisp dark navy typography, fine blue/teal outlines, restrained pastel panel backgrounds, precise grid, simple line icons, generous whitespace. Title: "Enterprise Knowledge Copilot". Subtitle: "Application Architecture". Clean professional diagram suitable for a technical presentation. Technical correctness matters more than connector complexity. Use exactly the following layout with only explicitly specified arrows.
+Five horizontal full-width tiers, stacked vertically, all within canvas safe margins:
+TIER 1 single centered wide card: "React Portal" with subtitle "Employees & Administrators | Chat · Documents · Tickets · Dashboard · Admin".
+One downward arrow to TIER 2.
+TIER 2 single wide card: "FastAPI Backend" subtitle "JWT Authentication · Role-Based Access · Safety Checks". Small secondary line inside same card "Optional: Cloudflare protected sharing gateway · ReAct agent tools". No arrows for optional features.
+One downward arrow splitting into two short arrows, one per TIER 3 lane.
+TIER 3 a very wide container labeled "Python Application Modules", with two equal columns:
+LEFT COLUMN label "Knowledge Ingestion". Three cards vertically, connected only downward: "Parse & Prepare" subtitle "PDF · DOCX · PPTX · Ticket CSVs"; then "Classify & Chunk" subtitle "PII Hashing · OCR · Document Metadata"; then "Enrich & Embed" subtitle "LLM Enrichment · BGE-small · 384 dimensions".
+RIGHT COLUMN label "Retrieval & Answers". Three cards vertically, connected only downward: "Understand & Retrieve" subtitle "Intent · Filters · HyDE · Vector Search + BM25"; then "Fuse & Rerank" subtitle "RRF · Cross-Encoder · Feedback Boosts"; then "Generate & Validate" subtitle "Grounded Answer · Citations · Confidence · Safety".
+ABSOLUTELY NO CONNECTORS BETWEEN LEFT AND RIGHT COLUMNS. ABSOLUTELY NO SIDEWAYS CONNECTORS.
+TIER 4 full-width shared services panel titled "Shared Local Services & Persistence", aligned below both lanes with a SINGLE short downward arrow from bottom center of tier 3 container to top center of tier 4 container. This arrow represents application dependencies in aggregate. Inside tier 4, four evenly sized cards horizontally, no arrows between them:
+"Qdrant" subtitle "Vectors + Chunk Payloads" smaller line "content · summary · question · keyword"
+"PostgreSQL" subtitle "Relational Application Data" smaller line "Users · Documents · Tickets · History · Analytics"
+"Redis" subtitle "BM25 Corpus Persistence" smaller line "Embedding Cache"
+"File Storage" subtitle "Original Uploads" smaller line "Extracted Images"
+TIER 5 a full-width panel titled "Model Providers", with two equal horizontal cards, no arrows:
+"Local Ollama" subtitle "Answer Generation · HyDE · Enrichment · Optional Vision"
+"OpenRouter (Optional)" subtitle "Selected Free Answer Model · Server Configuration Required"
+Tiny footer: "Arrows show primary processing order. Shared services support the application modules."
+Do not draw arrows from persistence tier into model tier. Do not draw return arrows. Do not invent extra file formats or cloud services. All text must be correctly spelled and legible. Flat elegant vector-like graphic style, no 3D, no watermark. This is a diagram of an existing application, not a claim of production certification.

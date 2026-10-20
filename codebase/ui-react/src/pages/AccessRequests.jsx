@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { api } from '../services/api'
+import { documentFilename } from '../services/documentNames'
 import { useAuth } from '../context/AuthContext'
 import { ShieldCheck, Send, Clock, Check, X, AlertCircle, Loader2, FileText, ChevronDown, ChevronUp } from 'lucide-react'
 
@@ -97,7 +98,7 @@ export default function AccessRequests() {
     setSelectedFiles(prev => {
       const exists = prev.find(f => f.key === key)
       if (exists) return prev.filter(f => f.key !== key)
-      return [...prev, { key, repo, docId: key, filename: doc.filename || doc.title || doc.name }]
+      return [...prev, { key, repo, docId: key, filename: documentFilename(doc) }]
     })
   }
 
@@ -275,7 +276,7 @@ export default function AccessRequests() {
                               onChange={() => toggleFile(repo.name, doc)}
                               className="rounded border-slate-600 bg-slate-800 text-brand-500 focus:ring-brand-500/30" />
                             <FileText size={11} className="text-slate-500 flex-shrink-0" />
-                            <span className="text-xs text-slate-300 truncate">{doc.filename || doc.title || doc.name}</span>
+                            <span className="text-xs text-slate-300 truncate" title={documentFilename(doc)}>{documentFilename(doc)}</span>
                           </label>
                         )
                       })}

@@ -28,7 +28,8 @@ from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional, Literal
 
 import psycopg2
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, Query
+from api.access_control import signed_in_roles, access_parameters, DOCUMENT_VISIBLE, allowed_repositories, repository_roles, payload_visible, ticket_visible, TICKET_REPOSITORY_SQL
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
@@ -489,22 +490,40 @@ def _blocked_chat(req, current_user, violation, persist=True):
 @app.post("/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest, current_user: CurrentUser = Depends(get_current_user)):
     from api.guardrails import check_input, check_output, safe_history, safe_metadata, GuardrailViolation
+    import time
+    started = time.monotonic()
     req = req.model_copy(update={'session_id': req.session_id or str(uuid.uuid4()),
                                  'chat_history': safe_history(req.chat_history)})
     try:
         check_input(req.query)
         from api.citation_policy import non_document_reply
         if reply := non_document_reply(req.query):
-            return _non_document_chat(req, current_user, reply)
-        response = await _run_chat(req, current_user)
+            response = _non_document_chat(req, current_user, reply)
+        else:
+            response = await _run_chat(req, current_user)
     except GuardrailViolation as violation:
-        return _blocked_chat(req, current_user, violation)
+        response = _blocked_chat(req, current_user, violation)
     try:
         check_output(response.answer)
     except GuardrailViolation as violation:
-        return _blocked_chat(req, current_user, violation, persist=False)
+        response = _blocked_chat(req, current_user, violation, persist=False)
     from api.citation_policy import apply_citation_policy
-    return ChatResponse.model_validate(safe_metadata(apply_citation_policy(response.model_dump(), req.query)))
+    payload = response.model_dump()
+    if not response.guardrail.get('blocked'):
+        payload = apply_citation_policy(payload, req.query)
+    response = ChatResponse.model_validate(safe_metadata(payload))
+    if analytics_service and current_user.user_id != 'anonymous':
+        try:
+            analytics_service.log_query(
+                query_text='[Request blocked by safety checks.]' if response.guardrail.get('stage') == 'input' else req.query,
+                intent=response.intent, repository_names=response.repositories_searched,
+                expanded_queries=response.expanded_queries, chunks_retrieved=response.chunks_used,
+                confidence=response.confidence, latency_ms=int((time.monotonic() - started) * 1000),
+                reranker_top_score=response.confidence_breakdown.get('reranker', 0),
+                low_confidence=response.low_confidence, user_id=current_user.user_id, session_id=response.session_id)
+        except Exception:
+            logger.warning('Could not record personal query analytics')
+    return response
 
 
 async def _run_chat(req: ChatRequest, current_user: CurrentUser):
@@ -513,6 +532,7 @@ async def _run_chat(req: ChatRequest, current_user: CurrentUser):
     QU(9 steps) → HyDE → Dense+Question+BM25 → RRF → CrossEncoder → Context → LLM
     """
     import time
+    signed_in_roles(current_user)
     if req.provider == "openrouter" and current_user.user_id == "anonymous":
         raise HTTPException(401, "Sign in to use OpenRouter models")
     await model_service.validate(req.provider, req.model)
@@ -521,7 +541,7 @@ async def _run_chat(req: ChatRequest, current_user: CurrentUser):
     # RBAC: prefer authenticated user's access_roles (LLD §7); fall back to
     # request body for unauthenticated/legacy calls.
     if current_user.user_id != "anonymous":
-        rbac_roles = current_user.access_roles or ["EMPLOYEE"]
+        rbac_roles = signed_in_roles(current_user)
     else:
         rbac_roles = req.rbac_roles or ["EMPLOYEE"]
 
@@ -559,6 +579,14 @@ async def _run_chat(req: ChatRequest, current_user: CurrentUser):
     # UI-selected document IDs override bundle/session scoping
     if req.document_ids:
         query_ctx.active_document_ids = req.document_ids
+
+    if query_ctx.active_document_ids:
+        from sqlalchemy import create_engine, text as sql_text
+        with create_engine(settings.postgres_url).connect() as conn:
+            permitted = conn.execute(sql_text(f'SELECT d.doc_id::text FROM documents d WHERE d.doc_id::text=ANY(:ids) AND {DOCUMENT_VISIBLE}'),
+                {'ids':list(map(str, query_ctx.active_document_ids)), **access_parameters(rbac_roles)}).scalars().all()
+        if set(permitted) != set(map(str, query_ctx.active_document_ids)):
+            raise HTTPException(403, 'A selected document is outside your assigned repositories.')
 
     # Look up source_file for each scoped doc_id (Postgres), so
     # `_direct_document_retrieval` / `get_chunks_by_doc` can fall back to
@@ -624,6 +652,7 @@ async def _run_chat(req: ChatRequest, current_user: CurrentUser):
             logger.warning(f"Exact ticket-ID lookup failed: {e}")
             exact_rows = []
 
+        exact_rows = [ticket for ticket in exact_rows if ticket_visible(ticket, rbac_roles)]
         if exact_rows:
             latency_ms = int((time.time() - t_start) * 1000)
             answer = _format_ticket_answer(exact_rows)
@@ -710,7 +739,7 @@ async def _run_chat(req: ChatRequest, current_user: CurrentUser):
         latency_ms = int((time.time() - t_start) * 1000)
         filters = _extract_ticket_filters(req.query)
         try:
-            count = _run_ticket_count_query(filters)
+            count = _run_ticket_count_query(filters, allowed_repositories(rbac_roles))
             label = _describe_ticket_filters(filters)
             answer = f"There are **{count}** {label}."
             from api.guardrails import check_output
@@ -869,6 +898,8 @@ async def _run_chat(req: ChatRequest, current_user: CurrentUser):
     # `source_file`(s) — the default max_per_doc=3 would discard most of that
     # sample for a single scoped document. Raise both caps in this mode so the
     # outline + sample actually reach the LLM.
+    result.chunks = [chunk for chunk in result.chunks if payload_visible(chunk.__dict__, rbac_roles)]
+    ticket_candidates = [ticket for ticket in ticket_candidates if ticket_visible(ticket, rbac_roles)]
     if result.pipeline_stats.get("mode") == "document_scope_summary":
         # `result.chunks` = 1 outline chunk per scoped doc + an
         # evenly-spaced content sample (up to top_k=8 per doc). Sending
@@ -975,23 +1006,6 @@ async def _run_chat(req: ChatRequest, current_user: CurrentUser):
 
     # ── Analytics logging ──────────────────────────────────────────────────────
     chat_user_id = current_user.user_id if current_user.user_id != "anonymous" else None
-    if analytics_service:
-        try:
-            analytics_service.log_query(
-                query_text=req.query,
-                intent=query_ctx.intent,
-                repository_names=query_ctx.repositories,
-                expanded_queries=query_ctx.expanded_queries,
-                chunks_retrieved=len(result.chunks),
-                confidence=conf_breakdown.overall,
-                latency_ms=latency_ms,
-                reranker_top_score=result.chunks[0].rerank_score if result.chunks else 0.0,
-                low_confidence=result.low_confidence,
-                user_id=chat_user_id,
-                session_id=session_id,
-            )
-        except Exception:
-            pass
 
     # ── Audit logging ────────────────────────────────────────────────────────
     try:
@@ -1207,10 +1221,13 @@ def _extract_ticket_filters(query: str) -> Dict[str, str]:
     return filters
 
 
-def _run_ticket_count_query(filters: Dict[str, str]) -> int:
+def _run_ticket_count_query(filters: Dict[str, str], repositories=None) -> int:
     from sqlalchemy import create_engine, text as sql_text
     engine = create_engine(settings.postgres_url)
     clauses, params = [], {}
+    if repositories is not None:
+        clauses.append(f"{TICKET_REPOSITORY_SQL} = ANY(CAST(:repos AS text[]))")
+        params['repos'] = repositories
     for col in ("status", "priority", "category"):
         if filters.get(col):
             clauses.append(f"{col} = :{col}")
@@ -1336,12 +1353,13 @@ async def _run_agent_chat(req: AgentChatRequest, current_user: CurrentUser):
     ReAct loop over document_search / ticket_lookup / summarizer tools,
     with a deterministic Plan-Execute fallback if no local LLM is available.
     """
+    signed_in_roles(current_user)
     if agent_orchestrator is None:
         raise HTTPException(status_code=503, detail="Agent orchestrator not initialized")
 
     session_id = req.session_id or str(uuid.uuid4())
     if current_user.user_id != "anonymous":
-        rbac_roles = current_user.access_roles or ["EMPLOYEE"]
+        rbac_roles = signed_in_roles(current_user)
     else:
         rbac_roles = req.rbac_roles or ["EMPLOYEE"]
 
@@ -1415,7 +1433,7 @@ async def resolve_gap(gap_id: str):
 
 
 # ── Evaluation metrics ─────────────────────────────────────────────────────────
-@app.get("/analytics/evaluation")
+@app.get("/analytics/evaluation", dependencies=[Depends(require_roles('ADMIN', 'IT_ADMIN', 'EXECUTIVE'))])
 async def evaluation_metrics(days: int = 7):
     """Full retrieval evaluation: Precision@5, Recall@5, MRR, Hit Rate."""
     if not rag_evaluator:
@@ -1682,20 +1700,22 @@ def _map_category_to_dept(category: str) -> str:
 
 # ── v2: Repository endpoints ───────────────────────────────────────────────────
 @app.get("/repositories")
-async def get_repositories():
+async def get_repositories(current_user: CurrentUser = Depends(get_current_user)):
     """List all knowledge repositories with document/chunk counts."""
+    roles = signed_in_roles(current_user)
     if not repo_service:
         raise HTTPException(503, "Repository service unavailable")
-    repos = repo_service.get_all()
+    repos = repo_service.get_all(user_roles=roles)
     return {"repositories": repos}
 
 
 @app.get("/repositories/{name}/documents")
-async def get_repo_documents(name: str, limit: int = 50):
+async def get_repo_documents(name: str, limit: int = 50, current_user: CurrentUser = Depends(get_current_user)):
     """Get documents in a specific repository."""
+    roles = signed_in_roles(current_user)
     if not repo_service:
         raise HTTPException(503, "Repository service unavailable")
-    docs = repo_service.get_documents(name, limit=limit)
+    docs = repo_service.get_documents(name, limit=limit, user_roles=roles)
     return {"repository": name, "documents": docs, "count": len(docs)}
 
 
@@ -1714,7 +1734,7 @@ async def list_documents(
     """
     from sqlalchemy import create_engine, text as sql_text
 
-    user_roles = set(r.upper() for r in (current_user.access_roles or ["EMPLOYEE"]))
+    user_roles = set(signed_in_roles(current_user))
     user_roles.add((current_user.role or "").upper())
     is_admin = bool(user_roles & {"ADMIN", "IT_ADMIN", "EXECUTIVE"})
 
@@ -1726,16 +1746,16 @@ async def list_documents(
                     "SELECT d.doc_id, d.title, d.source_file, d.doc_type, d.department, "
                     "d.doc_origin, d.chunk_count, d.access_roles, d.ingested_at, r.name as repository "
                     "FROM documents d LEFT JOIN repositories r ON d.repository_id = r.repository_id "
-                    "WHERE r.name = :repo ORDER BY d.ingested_at DESC LIMIT :limit"
-                ), {"repo": repository, "limit": limit})
+                    f"WHERE r.name = :repo AND {DOCUMENT_VISIBLE} ORDER BY d.ingested_at DESC LIMIT :limit"
+                ), {"repo": repository, "limit": limit, **access_parameters(user_roles)})
             else:
                 rows = conn.execute(sql_text(
                     "SELECT d.doc_id, d.title, d.source_file, d.doc_type, d.department, "
                     "d.doc_origin, d.chunk_count, d.access_roles, d.ingested_at, "
                     "r.name as repository "
                     "FROM documents d LEFT JOIN repositories r ON d.repository_id = r.repository_id "
-                    "ORDER BY d.ingested_at DESC LIMIT :limit"
-                ), {"limit": limit})
+                    f"WHERE {DOCUMENT_VISIBLE} ORDER BY d.ingested_at DESC LIMIT :limit"
+                ), {"limit": limit, **access_parameters(user_roles)})
             all_docs = [dict(r._mapping) for r in rows]
 
         if is_admin:
@@ -1768,7 +1788,7 @@ async def get_document(
     """
     from sqlalchemy import create_engine, text as sql_text
 
-    user_roles = set(r.upper() for r in (current_user.access_roles or ["EMPLOYEE"]))
+    user_roles = set(signed_in_roles(current_user))
     user_roles.add((current_user.role or "").upper())
     is_admin = bool(user_roles & {"ADMIN", "IT_ADMIN", "EXECUTIVE"})
 
@@ -1795,6 +1815,8 @@ async def get_document(
         access_roles = doc.get("access_roles")
         if access_roles and not (set(r.upper() for r in access_roles) & user_roles):
             raise HTTPException(403, "You don't have access to this document")
+        if doc.get('repository') not in allowed_repositories(user_roles):
+            raise HTTPException(403, "You don't have access to this repository")
 
     chunks = []
     if vector_store:
@@ -1842,15 +1864,15 @@ async def get_document_file(
     """
     from sqlalchemy import create_engine, text as sql_text
 
-    user_roles = set(r.upper() for r in (current_user.access_roles or ["EMPLOYEE"]))
+    user_roles = set(signed_in_roles(current_user))
     user_roles.add((current_user.role or "").upper())
     is_admin = bool(user_roles & {"ADMIN", "IT_ADMIN", "EXECUTIVE"})
 
     engine = create_engine(settings.postgres_url)
     with engine.connect() as conn:
         row = conn.execute(sql_text(
-            "SELECT source_file, source_type, file_path, access_roles "
-            "FROM documents WHERE doc_id = :doc_id"
+            "SELECT d.source_file, d.source_type, d.file_path, d.access_roles, r.name AS repository "
+            "FROM documents d LEFT JOIN repositories r ON r.repository_id=d.repository_id WHERE d.doc_id = :doc_id"
         ), {"doc_id": doc_id}).fetchone()
 
     if not row:
@@ -1860,6 +1882,8 @@ async def get_document_file(
         access_roles = row.access_roles
         if access_roles and not (set(r.upper() for r in access_roles) & user_roles):
             raise HTTPException(403, "You don't have access to this document")
+        if row.repository not in allowed_repositories(user_roles):
+            raise HTTPException(403, "You don't have access to this repository")
 
     if not row.file_path or not os.path.exists(row.file_path):
         raise HTTPException(404, "Original file not available for this document")
@@ -1982,46 +2006,54 @@ async def search_tickets_v2(
     q: str,
     category: Optional[str] = None,
     priority: Optional[str] = None,
-    limit: int = 10,
+    limit: int = Query(default=10, ge=1, le=100),
+    current_user: CurrentUser = Depends(get_current_user),
 ):
     """Enhanced ticket search with known issue detection."""
+    roles = signed_in_roles(current_user)
     if not ticket_intelligence:
         raise HTTPException(503, "Ticket intelligence unavailable")
-    result = ticket_intelligence.search_tickets(q, category, priority, limit)
+    result = ticket_intelligence.search_tickets(q, category, priority, limit, user_roles=roles)
     return result
 
 
 @app.get("/tickets/recent")
-async def recent_tickets(limit: int = 20, category: Optional[str] = None):
+async def recent_tickets(limit: int = Query(default=20, ge=1, le=100), category: Optional[str] = None,
+                         current_user: CurrentUser = Depends(get_current_user)):
     """Get most recent tickets."""
+    roles = signed_in_roles(current_user)
     if not ticket_intelligence:
         raise HTTPException(503, "Ticket intelligence unavailable")
-    tickets = ticket_intelligence.get_recent_tickets(limit, category)
+    tickets = ticket_intelligence.get_recent_tickets(limit, category, user_roles=roles)
     return {"tickets": tickets}
 
 
 @app.get("/tickets/categories")
-async def ticket_categories():
+async def ticket_categories(current_user: CurrentUser = Depends(get_current_user)):
     """Ticket breakdown by category for dashboard."""
+    roles = signed_in_roles(current_user)
     if not ticket_intelligence:
         raise HTTPException(503, "Ticket intelligence unavailable")
-    breakdown = ticket_intelligence.get_category_breakdown()
-    total = ticket_intelligence.get_total_count()
+    breakdown = ticket_intelligence.get_category_breakdown(user_roles=roles)
+    total = ticket_intelligence.get_total_count(user_roles=roles)
     return {"categories": breakdown, "total": total}
 
 
 # ── v2: Analytics endpoints ────────────────────────────────────────────────────
 @app.get("/analytics/dashboard")
-async def analytics_dashboard(days: int = 7, current_user: CurrentUser = Depends(get_current_user)):
-    """Dashboard metrics: query volume, confidence, latency, repo usage.
-    Recent Queries are scoped to the current user (when authenticated)."""
+async def analytics_dashboard(days: int = Query(default=7, ge=1, le=365), current_user: CurrentUser = Depends(get_current_user)):
+    """Personal query metrics and role-filtered knowledge totals; sign-in required."""
+    roles = signed_in_roles(current_user)
     if not analytics_service:
         raise HTTPException(503, "Analytics service unavailable")
-    uid = current_user.user_id if current_user.user_id != "anonymous" else None
-    return analytics_service.get_dashboard_metrics(days, user_id=uid)
+    try:
+        return analytics_service.get_dashboard_metrics(days, user_id=current_user.user_id,
+            user_roles=roles, user_email=current_user.email)
+    except RuntimeError:
+        raise HTTPException(503, 'Dashboard metrics are temporarily unavailable')
 
 
-@app.get("/analytics/evaluation")
+@app.get("/analytics/evaluation/summary", dependencies=[Depends(require_roles('ADMIN', 'IT_ADMIN', 'EXECUTIVE'))])
 async def evaluation_metrics():
     """Retrieval evaluation: hit rate, confidence distribution, P95 latency."""
     if not analytics_service:
@@ -2155,9 +2187,7 @@ async def _run_ingest_job(
             logger.warning(f"Image-aware ingestion skipped for {filename}: {img_err}")
 
         # Parse RBAC roles
-        roles_list = ["EMPLOYEE", "MANAGER", "HR", "FINANCE", "IT_ADMIN", "EXECUTIVE"]
-        if access_roles:
-            roles_list = [r.strip() for r in access_roles.split(",")]
+        roles_list = repository_roles(resolved_repo or dept)
 
         uploaded_by = current_user.user_id if current_user.user_id != "anonymous" else "system"
         created_at = datetime.utcnow().isoformat()
@@ -2636,7 +2666,7 @@ async def status():
     repos = []
     if repo_service:
         try:
-            repos = repo_service.get_all()
+            repos = repo_service.get_all(user_roles=['ADMIN'])
         except Exception:
             pass
 

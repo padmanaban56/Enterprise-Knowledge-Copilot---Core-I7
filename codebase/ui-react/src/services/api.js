@@ -8,11 +8,18 @@ function authHeaders() {
 }
 
 async function request(path, options = {}) {
+  const headers = { 'Content-Type': 'application/json', ...authHeaders(), ...options.headers }
+  const sentToken = headers.Authorization?.startsWith('Bearer ') ? headers.Authorization.slice(7) : null
   const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...authHeaders(), ...options.headers },
     ...options,
+    headers,
   })
-  if (res.status === 401) {
+  const sharingChallenge = res.status === 401 && /^Basic\b/i.test(res.headers.get('WWW-Authenticate') || '')
+  if (sharingChallenge) {
+    throw new Error('Sharing access needs to be renewed. Reload this page and enter the sharing credentials.')
+  }
+  // A stale/no-token request or a failed login must not clear a newer session.
+  if (res.status === 401 && path !== '/auth/login' && sentToken && localStorage.getItem('ekc_token') === sentToken) {
     localStorage.removeItem('ekc_token')
     localStorage.removeItem('ekc_user')
     if (!window.location.pathname.startsWith('/login')) {

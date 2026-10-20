@@ -6,7 +6,7 @@ import AccessRequestsAdmin from '../components/AccessRequestsAdmin'
 import AuditLogAdmin from '../components/AuditLogAdmin'
 
 const REPOS = ['HR','Finance','IT','Engineering','Projects','External']
-const ROLES_LIST = ['EMPLOYEE','MANAGER','HR','FINANCE','IT_ADMIN','EXECUTIVE']
+const REPO_ROLES = { HR:['HR'], IT:['IT'], Engineering:['ENGINEERING'], Projects:['PROJECTS'], Finance:['FINANCE'], External:['EXTERNAL'] }
 
 function EvalMetrics({ metrics }) {
   if (!metrics || metrics.error) return (
@@ -192,7 +192,7 @@ export default function Admin() {
   const [ticketJobs, setTicketJobs]   = useState([]) // P10: same shape as uploadJobs
   const [repo, setRepo]               = useState('IT')
   const [origin, setOrigin]           = useState('INTERNAL')
-  const [roles, setRoles]             = useState(['EMPLOYEE','MANAGER'])
+  const roles = REPO_ROLES[repo] || ['ADMIN']
   const [activeTab, setActiveTab]     = useState('upload')
   const [clearModal, setClearModal]   = useState(null) // null | 'all' | 'documents' | 'tickets'
   const [clearConfirmText, setClearConfirmText] = useState('')
@@ -329,7 +329,6 @@ export default function Admin() {
     } catch(e) {}
   }
 
-  const toggleRole = (r) => setRoles(prev => prev.includes(r) ? prev.filter(x=>x!==r) : [...prev,r])
 
   const handleClearKnowledgeBase = async () => {
     if (clearConfirmText.trim().toUpperCase() !== 'DELETE') return
@@ -427,13 +426,12 @@ export default function Admin() {
                 </div>
               </div>
               <div>
-                <label className="text-xs text-slate-500 mb-1 block">Access Roles (RBAC)</label>
+                <label className="text-xs text-slate-500 mb-1 block">Repository access roles (assigned automatically on upload)</label>
                 <div className="flex flex-wrap gap-1.5">
-                  {ROLES_LIST.map(r => (
-                    <button key={r} onClick={() => toggleRole(r)}
-                      className={`badge cursor-pointer transition-colors ${roles.includes(r) ? 'bg-brand-600/25 text-brand-300 border border-brand-500/40' : 'bg-slate-700/50 text-slate-500 hover:text-slate-300'}`}>
+                  {roles.map(r => (
+                    <span key={r} className="badge bg-brand-600/25 text-brand-300 border border-brand-500/40">
                       {r}
-                    </button>
+                    </span>
                   ))}
                 </div>
               </div>

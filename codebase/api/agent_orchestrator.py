@@ -121,7 +121,7 @@ class AgentOrchestrator:
         }
 
     def tool_ticket_lookup(
-        self, query: str, ticket_ids: Optional[List[str]] = None,
+        self, query: str, ticket_ids: Optional[List[str]] = None, rbac_roles=None,
     ) -> Dict[str, Any]:
         """Tool 2: Ticket lookup via the dual-path ticket retriever."""
         if self.ticket_retriever is None:
@@ -137,6 +137,10 @@ class AgentOrchestrator:
             filters={},
             vector_store=self.hybrid_engine.vector_store,
         )
+        if rbac_roles is not None:
+            from api.access_control import ticket_visible
+            candidates = [ticket for ticket in path.get('candidates', []) if ticket_visible(ticket, rbac_roles)]
+            return {'candidates': candidates, 'stats': {'total': len(candidates)}}
         return path
 
     async def tool_summarizer(self, text: str, max_words: int = 150) -> str:
@@ -262,7 +266,7 @@ class AgentOrchestrator:
                 result = await self.tool_document_search(action_input, rbac_roles=rbac_roles)
                 return json.dumps(result)
             elif action == "ticket_lookup":
-                result = self.tool_ticket_lookup(action_input)
+                result = self.tool_ticket_lookup(action_input, rbac_roles=rbac_roles)
                 return json.dumps(result)
             elif action == "summarizer":
                 result = await self.tool_summarizer(action_input)
@@ -299,7 +303,7 @@ class AgentOrchestrator:
         # 3. ticket_lookup if intent suggests it
         ticket_result = None
         if query_ctx.intent == "TICKET_LOOKUP":
-            ticket_result = self.tool_ticket_lookup(query, ticket_ids=query_ctx.ticket_ids)
+            ticket_result = self.tool_ticket_lookup(query, ticket_ids=query_ctx.ticket_ids, rbac_roles=rbac_roles)
             steps.append(AgentStep(
                 step=step_n, action="ticket_lookup", action_input=query,
                 observation=json.dumps(ticket_result),

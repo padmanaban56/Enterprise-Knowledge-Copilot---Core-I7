@@ -11,6 +11,42 @@ An enterprise-grade RAG platform that goes far beyond generic chatbot RAG. The c
 
 ---
 
+## Temporary sharing from this laptop
+
+Ticket access follows the signed-in account's department roles: HR sees HR tickets,
+Finance sees Finance, developers see Engineering and Projects, and IT sees IT,
+Operations, and Security. Administrators see all ticket categories. The backend
+applies these rules before search limits, category counts, and known-issue summaries;
+requesting another department's category does not grant access. Dashboard ticket
+cards continue to count the signed-in user's own requests.
+
+The native laptop setup includes `scripts/start-sharing.ps1` and
+`scripts/stop-sharing.ps1`. The start script expects the workspace's
+`start-app.ps1` launcher, builds the frontend, and creates a temporary HTTPS
+Cloudflare tunnel to a password-protected gateway on loopback port 3001.
+The link and generated sharing credentials are written outside this repository,
+to the workspace's `.local/share-access.json`. Visitors enter those credentials
+and then sign in with an app account. Keep the host laptop awake and online.
+The gateway requires app tokens for API calls, restricts administrative actions,
+disables demo SSO provisioning, and limits shared uploads to 32 MB.
+
+```powershell
+.\scripts\start-sharing.ps1
+.\scripts\stop-sharing.ps1
+```
+
+Stopping sharing closes the public link and leaves the local app running.
+Shared traffic passes through Cloudflare. Links change on each new tunnel.
+
+Source lists group repeated chunks from the same document into one card and
+retain their original reference numbers and page links.
+
+The Home dashboard shows each signed-in user's own query counts, average
+confidence and latency, charts, and recent queries, including for admin accounts.
+Knowledge totals and repository cards follow document access roles; ticket and
+pending-access-request cards count the user's own records. Authentication is
+required, and global retrieval evaluation is limited to administrative roles.
+
 ## Your Current Setup
 
 | Item | Status |
@@ -132,6 +168,7 @@ Get-Content ingestion/migration_v6.sql | docker exec -i postgres-ekc psql -U pos
 
 python scripts/migrate_v7.py
 python scripts/migrate_v8.py
+python scripts/migrate_v9.py
 
 python fix_password.py
 ```

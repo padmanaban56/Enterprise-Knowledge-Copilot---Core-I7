@@ -100,6 +100,7 @@ def issue_token(user_row: dict) -> TokenResponse:
         "department": user_row.get("department"),
         "role": user_row.get("role", "employee"),
         "access_roles": access_roles,
+        "auth_version": int(user_row.get('auth_version', 0)),
         "exp": expire_at,
         "iat": datetime.now(timezone.utc),
     }
@@ -139,7 +140,7 @@ class AuthService:
             row = conn.execute(
                 text(
                     "SELECT user_id, email, username, department, role, "
-                    "password_hash, access_roles, is_active "
+                    "password_hash, access_roles, is_active, auth_version "
                     "FROM users WHERE email = :email"
                 ),
                 {"email": email},
@@ -151,7 +152,7 @@ class AuthService:
             row = conn.execute(
                 text(
                     "SELECT user_id, email, username, department, role, "
-                    "access_roles, is_active "
+                    "access_roles, is_active, auth_version "
                     "FROM users WHERE sso_provider = :p AND sso_subject = :s"
                 ),
                 {"p": provider, "s": sso_subject},
@@ -189,6 +190,11 @@ class AuthService:
                 text("UPDATE users SET last_login_at = NOW() WHERE user_id = :uid"),
                 {"uid": user_id},
             )
+
+    def get_user_by_id(self, user_id: str) -> Optional[dict]:
+        with self.engine.connect() as conn:
+            row = conn.execute(text('SELECT user_id,email,username,department,role,access_roles,is_active,auth_version FROM users WHERE user_id=:uid'), {'uid':user_id}).fetchone()
+            return dict(row._mapping) if row else None
 
     def create_user(
         self, email: str, username: str, department: Optional[str] = None,
@@ -424,7 +430,7 @@ class AuthService:
         with self.engine.begin() as conn:
             row = conn.execute(
                 text(
-                    "UPDATE users SET role = :role, access_roles = :access_roles "
+                    "UPDATE users SET role = :role, access_roles = :access_roles, auth_version=auth_version+1 "
                     "WHERE user_id = :uid "
                     "RETURNING user_id, email, username, role, access_roles, is_active"
                 ),
@@ -451,7 +457,7 @@ class AuthService:
         with self.engine.begin() as conn:
             conn.execute(
                 text(
-                    "UPDATE users SET password_hash = :hash, must_change_password = FALSE "
+                    "UPDATE users SET password_hash = :hash, must_change_password = FALSE, auth_version=auth_version+1 "
                     "WHERE user_id = :uid"
                 ),
                 {"hash": new_hash, "uid": user_id},
@@ -464,7 +470,7 @@ class AuthService:
         with self.engine.begin() as conn:
             row = conn.execute(
                 text(
-                    "UPDATE users SET password_hash = :hash, must_change_password = TRUE "
+                    "UPDATE users SET password_hash = :hash, must_change_password = TRUE, auth_version=auth_version+1 "
                     "WHERE user_id = :uid "
                     "RETURNING email, username"
                 ),
@@ -512,13 +518,13 @@ async def get_current_user(token: Optional[str] = Depends(_oauth2_scheme)) -> Cu
         )
 
     payload = decode_token(token)
+    user = get_auth_service().get_user_by_id(payload['sub'])
+    if not user or not user.get('is_active') or int(payload.get('auth_version', 0)) != int(user['auth_version']):
+        raise HTTPException(401, 'Your account permissions or password changed. Please sign in again.')
     return CurrentUser(
-        user_id=payload["sub"],
-        email=payload["email"],
-        username=payload["username"],
-        department=payload.get("department"),
-        role=payload.get("role", "employee"),
-        access_roles=payload.get("access_roles", ["EMPLOYEE"]),
+        user_id=str(user['user_id']), email=user['email'], username=user['username'],
+        department=user.get('department'), role=user.get('role', 'employee'),
+        access_roles=user.get('access_roles') or [],
     )
 
 

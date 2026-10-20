@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import { createContext, useContext, useState, useCallback } from 'react'
 import { api } from '../services/api'
 
 const AuthContext = createContext(null)
@@ -12,23 +12,18 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
-  useEffect(() => {
-    if (token) localStorage.setItem('ekc_token', token)
-    else localStorage.removeItem('ekc_token')
-  }, [token])
-
-  useEffect(() => {
-    if (user) localStorage.setItem('ekc_user', JSON.stringify(user))
-    else localStorage.removeItem('ekc_user')
-  }, [user])
-
   const login = useCallback(async (email, password) => {
     setLoading(true)
     setError(null)
     try {
       const res = await api.login({ email, password })
+      const nextUser = { ...res.user, must_change_password: res.must_change_password }
+      // Dashboard child effects can fetch before parent effects run. Commit
+      // credentials before changing auth state or allowing navigation.
+      localStorage.setItem('ekc_user', JSON.stringify(nextUser))
+      localStorage.setItem('ekc_token', res.access_token)
       setToken(res.access_token)
-      setUser({ ...res.user, must_change_password: res.must_change_password })
+      setUser(nextUser)
       return { user: res.user, must_change_password: res.must_change_password }
     } catch (e) {
       setError(e.message || 'Login failed')
@@ -39,6 +34,8 @@ export function AuthProvider({ children }) {
   }, [])
 
   const logout = useCallback(() => {
+    localStorage.removeItem('ekc_token')
+    localStorage.removeItem('ekc_user')
     setToken(null)
     setUser(null)
   }, [])

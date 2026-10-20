@@ -167,7 +167,7 @@ class BM25Store:
             for i, meta in enumerate(self._corpus_meta):
                 if doc_id_set is not None and meta.get("doc_id") not in doc_id_set:
                     continue
-                if repository is not None and meta.get("repository") != repository:
+                if repository is not None and meta.get("repository") not in (repository if isinstance(repository, list) else [repository]):
                     continue
                 if department is not None and meta.get("department") != department:
                     continue

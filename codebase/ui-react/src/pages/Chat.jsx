@@ -9,7 +9,7 @@ import {
 import { api } from '../services/api'
 import BundlePanel from '../components/BundlePanel'
 import ModelSelector from '../components/ModelSelector'
-import { citationHref, citationParts } from '../services/citations'
+import { citationHref, citationParts, uniqueCitationSources } from '../services/citations'
 import clsx from 'clsx'
 
 const REPO_COLORS = {
@@ -118,12 +118,13 @@ function PipelineTrace({ trace, stats, hydeUsed, subQueries, open, onToggle }) {
 // ── Sources & Retrieval Detail ───────────────────────────────────────────────
 function SourcesPanel({ citations, transparency, reposSearched, expandedQueries }) {
   const [tab, setTab] = useState('citations')
+  const sources = uniqueCitationSources(citations)
   if (!citations?.length && !transparency?.length) return null
 
   return (
     <div className="mt-2 rounded-xl border border-slate-700/40 overflow-hidden text-xs">
       <div className="flex border-b border-slate-700/40 bg-slate-800/40">
-        {[['citations',`Sources (${citations?.length||0})`],['chunks','Chunk Detail'],['meta','Query Meta']].map(([key,label])=>(
+        {[['citations',`Sources (${sources.length})`],['chunks','Chunk Detail'],['meta','Query Meta']].map(([key,label])=>(
           <button key={key} onClick={() => setTab(key)}
             className={`px-4 py-2 font-medium transition-colors flex-1 ${tab===key ? 'text-brand-300 border-b-2 border-brand-500 bg-slate-800/60' : 'text-slate-500 hover:text-slate-300'}`}>
             {label}
@@ -131,16 +132,16 @@ function SourcesPanel({ citations, transparency, reposSearched, expandedQueries 
         ))}
       </div>
       <div className="p-3 space-y-1.5 max-h-56 overflow-y-auto bg-slate-900/40">
-        {tab === 'citations' && citations?.map((c,i) => (
+        {tab === 'citations' && sources.map(({ citation: c, sourceNumbers, pages },i) => (
           <a key={i} href={citationHref(c)} target="_blank" rel="noopener noreferrer"
             title={c.doc_type === 'Ticket' ? 'View in Tickets' : 'Open source document in a new tab'}
             className="flex items-start gap-2 p-2 bg-slate-800/50 rounded-lg cursor-pointer hover:bg-slate-700/50 transition-colors">
-            <div className="w-5 h-5 rounded flex items-center justify-center bg-brand-600/20 text-brand-400 font-bold text-[10px] flex-shrink-0">{i+1}</div>
+            <div className="min-w-5 px-1 rounded flex items-center justify-center bg-brand-600/20 text-brand-400 font-bold text-[10px] flex-shrink-0">{sourceNumbers.join(', ')}</div>
             <div className="min-w-0 flex-1">
               <div className="text-slate-300 font-medium truncate">{c.source}</div>
               <div className="text-slate-500 mt-0.5 flex gap-2 flex-wrap">
                 <span>{c.section}</span>
-                {c.page > 0 && <span>p.{c.page}</span>}
+                {pages.length > 0 && <span>p.{pages.join(', ')}</span>}
                 {c.repository && (
                   <span className="badge text-[10px]" style={{background:`${REPO_COLORS[c.repository]}15`,color:REPO_COLORS[c.repository]||'#94a3b8'}}>{c.repository}</span>
                 )}
@@ -258,6 +259,7 @@ function Message({ msg, sessionId, onToggleSources, onToggleTrace }) {
   )
 
   const m = msg.meta || {}
+  const sources = uniqueCitationSources(m.citations)
   const conf = m.confidence || 0
   const confClass = conf >= 0.75 ? 'text-emerald-400 bg-emerald-500/10' : conf >= 0.55 ? 'text-amber-400 bg-amber-500/10' : 'text-red-400 bg-red-500/10'
 
@@ -275,9 +277,9 @@ function Message({ msg, sessionId, onToggleSources, onToggleTrace }) {
             : part.text)}
         </div>
         {m.citations?.length > 0 && <div className="mt-2 flex flex-wrap gap-2 text-xs" aria-label="Source documents">
-          {m.citations.map((citation, index) => <a key={index} href={citationHref(citation)} target="_blank" rel="noopener noreferrer"
+          {sources.map(({ citation, sourceNumbers, pages }, index) => <a key={index} href={citationHref(citation)} target="_blank" rel="noopener noreferrer"
             className="inline-flex items-center gap-1 rounded-lg border border-slate-700/50 px-2 py-1 text-brand-300 hover:bg-slate-800"
-            title="Open source in a new tab"><FileText size={12} />[{index + 1}] {citation.source || 'Source'}{citation.page > 0 ? ` · p.${citation.page}` : ''}</a>)}
+            title="Open source in a new tab"><FileText size={12} />[{sourceNumbers.join(', ')}] {citation.source || 'Source'}{pages.length ? ` · p.${pages.join(', ')}` : ''}</a>)}
         </div>}
 
         {m.guardrail?.blocked && <div role="status" className="mt-2 text-xs text-amber-400">Safety check: {m.guardrail.stage === 'input' ? 'request' : 'response'} blocked</div>}
@@ -295,7 +297,7 @@ function Message({ msg, sessionId, onToggleSources, onToggleTrace }) {
             {m.citations?.length > 0 && (
               <button onClick={onToggleSources}
                 className="text-xs text-brand-400 hover:text-brand-300 flex items-center gap-1">
-                <BookOpen size={10}/> {m.citations.length} sources
+                <BookOpen size={10}/> {sources.length} sources
                 {msg.showSources ? <ChevronUp size={10}/> : <ChevronDown size={10}/>}
               </button>
             )}

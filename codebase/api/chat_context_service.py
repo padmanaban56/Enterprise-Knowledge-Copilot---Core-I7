@@ -49,7 +49,9 @@ class ChatContextService:
             effective_ids = list(dict.fromkeys(manual_ids + [doc for bundle in bundles for doc in bundle['document_ids']]))
             documents = []
             if effective_ids:
-                rows = conn.execute(text('SELECT d.doc_id::text,d.source_file,d.title,d.access_roles,COALESCE(r.name,d.department) AS repository FROM documents d LEFT JOIN repositories r ON r.repository_id=d.repository_id WHERE d.doc_id::text=ANY(:ids)'), {'ids':effective_ids}).fetchall()
+                from api.access_control import DOCUMENT_VISIBLE, access_parameters
+                visibility = access_parameters(list(roles or []) + (['ADMIN'] if is_admin else []))
+                rows = conn.execute(text(f'SELECT d.doc_id::text,d.source_file,d.title,d.access_roles,COALESCE(r.name,d.department) AS repository FROM documents d LEFT JOIN repositories r ON r.repository_id=d.repository_id WHERE d.doc_id::text=ANY(:ids) AND {DOCUMENT_VISIBLE}'), {'ids':effective_ids, **visibility}).fetchall()
                 user_roles = {role.upper() for role in (roles or ['EMPLOYEE'])}
                 by_id = {r.doc_id:{'doc_id':r.doc_id,'filename':r.source_file or r.title,'repository':r.repository}
                          for r in rows if is_admin or not r.access_roles or user_roles.intersection(role.upper() for role in r.access_roles)}

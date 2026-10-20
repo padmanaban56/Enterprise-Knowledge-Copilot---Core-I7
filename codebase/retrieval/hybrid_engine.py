@@ -281,7 +281,7 @@ class HybridRetrievalEngine:
             if query_ctx.intent == "SUMMARIZE":
                 return self._direct_document_retrieval(
                     query_ctx, query_ctx.active_document_ids, top_k,
-                    t_start, scope_level, scope_label,
+                    t_start, scope_level, scope_label, rbac_roles=rbac_roles,
                 )
         elif scope_repository:
             qdrant_filters["repository"] = scope_repository
@@ -291,6 +291,18 @@ class HybridRetrievalEngine:
             trace["scope_filter"] = {"type": "department", "value": scope_department}
         else:
             trace["scope_filter"] = None
+
+        # Repository membership is an authorization boundary, independent of
+        # query-derived repository hints or legacy broad document-role arrays.
+        if rbac_roles:
+            from api.access_control import allowed_repositories, ADMIN_ROLES
+            if not ADMIN_ROLES.intersection(str(role).upper() for role in rbac_roles):
+                permitted = allowed_repositories(rbac_roles)
+                scoped = qdrant_filters.get('repository')
+                if scoped:
+                    scoped = scoped if isinstance(scoped, list) else [scoped]
+                    permitted = [repo for repo in permitted if repo in scoped]
+                qdrant_filters['repository'] = permitted or ['__NO_ASSIGNED_REPOSITORY__']
 
         # ── P5: HyDE — broadened trigger conditions ────────────────────────────
         # Trigger when ANY of:
@@ -642,6 +654,7 @@ class HybridRetrievalEngine:
         t_start: float,
         scope_level: int,
         scope_label: str,
+        rbac_roles: Optional[List[str]] = None,
     ) -> RetrievalResult:
         """
         Pull chunks directly from the scoped document(s) — via
@@ -701,6 +714,9 @@ class HybridRetrievalEngine:
             raw = self.vector_store.get_chunks_by_doc(
                 doc_id, source_file=query_ctx.active_document_source_files.get(doc_id), limit=500,
             )
+            if rbac_roles is not None:
+                from api.access_control import payload_visible
+                raw = [chunk for chunk in raw if payload_visible(chunk, rbac_roles)]
             per_doc_counts[doc_id] = len(raw)
             if not raw:
                 continue
@@ -835,6 +851,7 @@ class HybridRetrievalEngine:
                 fallback = self._direct_document_retrieval(
                     query_ctx, query_ctx.active_document_ids, top_k,
                     time.time(), scope_level=1, scope_label="DOCUMENT_FALLBACK",
+                    rbac_roles=rbac_roles,
                 )
                 if fallback.chunks:
                     levels_tried.append({"level": "1b", "label": "DOCUMENT_FALLBACK",
