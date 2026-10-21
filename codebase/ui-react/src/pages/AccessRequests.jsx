@@ -7,6 +7,9 @@ import { ShieldCheck, Send, Clock, Check, X, AlertCircle, Loader2, FileText, Che
 const ACCESS_ROLES = [
   { value: 'HR', label: 'HR', desc: 'Human Resources policies, onboarding, leave & benefits documents' },
   { value: 'FINANCE', label: 'Finance', desc: 'Invoices, expense policies, budgets, approval workflows' },
+  { value: 'IT', label: 'IT', desc: 'Information Technology documents and support tickets' },
+  { value: 'ENGINEERING', label: 'Engineering', desc: 'Engineering documents and tickets' },
+  { value: 'PROJECTS', label: 'Projects', desc: 'Project documents and tickets' },
   { value: 'MANAGER', label: 'Manager', desc: 'Team management resources, performance review templates' },
   { value: 'IT_ADMIN', label: 'IT Admin', desc: 'Infrastructure runbooks, admin consoles, elevated tickets' },
   { value: 'EXECUTIVE', label: 'Executive', desc: 'Strategy documents, board materials, company-wide reports' },
@@ -36,7 +39,7 @@ function StatusBadge({ status }) {
 
 export default function AccessRequests() {
   const { user } = useAuth()
-  const myRoles = user?.access_roles || []
+  const myRoles = (user?.access_roles || []).filter(role => !role.toUpperCase().startsWith('FILE:'))
   const [requests, setRequests] = useState([])
   const [loading, setLoading] = useState(true)
   const [selectedRole, setSelectedRole] = useState('')
@@ -56,7 +59,10 @@ export default function AccessRequests() {
 
   useEffect(() => {
     load()
-    api.getRepositories().then(r => setRepositories(r.repositories || [])).catch(() => {})
+    api.accessRequestCatalog().then(r => {
+      setRepositories(r.repositories || [])
+      setRepoDocuments(Object.fromEntries((r.repositories || []).map(repo => [repo.name, repo.documents || []])))
+    }).catch(e => setError(e.message))
   }, [])
 
   async function load() {
@@ -142,7 +148,8 @@ export default function AccessRequests() {
         // Submit one request per selected file
         for (const f of selectedFiles) {
           const body = {
-            resource_name: `FILE:${f.repo}/${f.filename}`,
+            resource_type: 'file',
+            resource_name: `FILE:${f.docId}`,
             justification,
             ...(duration ? { duration_days: parseInt(duration) } : {}),
           }
@@ -270,13 +277,16 @@ export default function AccessRequests() {
                       ) : (repoDocuments[repo.name] || []).map(doc => {
                         const key = doc.doc_id || doc.id || doc.filename
                         const isSelected = selectedFiles.find(f => f.key === key)
+                        const isPending = pendingRoleNames.has(`FILE:${key}`)
+                        const unavailable = doc.has_access || isPending
                         return (
                           <label key={key} className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-slate-800/60 cursor-pointer">
-                            <input type="checkbox" checked={!!isSelected}
+                            <input type="checkbox" checked={!!isSelected} disabled={unavailable}
                               onChange={() => toggleFile(repo.name, doc)}
                               className="rounded border-slate-600 bg-slate-800 text-brand-500 focus:ring-brand-500/30" />
                             <FileText size={11} className="text-slate-500 flex-shrink-0" />
                             <span className="text-xs text-slate-300 truncate" title={documentFilename(doc)}>{documentFilename(doc)}</span>
+                            {unavailable && <span className="text-xs text-slate-500">{doc.has_access ? 'Already accessible' : 'Pending'}</span>}
                           </label>
                         )
                       })}
@@ -325,7 +335,7 @@ export default function AccessRequests() {
             {requests.map(r => (
               <div key={r.request_id} className="card p-3 flex items-center justify-between">
                 <div>
-                  <div className="text-sm text-slate-300">{r.resource_name}</div>
+                  <div className="text-sm text-slate-300">{r.resource_display_name || r.resource_name}</div>
                   <div className="text-xs text-slate-600 mt-0.5">
                     {new Date(r.requested_at).toLocaleDateString()}
                     {r.duration_days && <span className="text-slate-500"> · {r.duration_days}d access</span>}

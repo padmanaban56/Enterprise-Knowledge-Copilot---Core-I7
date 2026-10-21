@@ -40,10 +40,17 @@ class ModelService:
         self.settings = get_settings()
         self._catalog = None
         self._expires = 0
+        self._active_key_index = 0
+
+    def _keys(self):
+        raw = self.settings.openrouter_api_keys.get_secret_value()
+        if not raw.strip():
+            raw = self.settings.openrouter_api_key.get_secret_value()
+        return list(dict.fromkeys(key.strip() for key in re.split(r'[,\n]+', raw) if key.strip()))
 
     @property
     def configured(self):
-        return bool(self.settings.openrouter_api_key.get_secret_value())
+        return bool(self._keys())
 
     async def openrouter_models(self):
         if self._catalog is not None and time.monotonic() < self._expires:
@@ -94,37 +101,44 @@ class ModelService:
 
     async def complete(self, model, system, prompt):
         await self.validate('openrouter', model)
-        headers = {'Authorization':'Bearer '+self.settings.openrouter_api_key.get_secret_value(),
-                   'X-Title':'Enterprise Knowledge Copilot'}
-        try:
-            async with httpx.AsyncClient(timeout=180) as client:
-                response = await client.post(f'{OPENROUTER_URL}/chat/completions', headers=headers,
-                    json={'model':model, 'messages':[{'role':'system','content':system},
-                          {'role':'user','content':prompt}], 'max_tokens':1024,
-                          'temperature':0.1, 'stream':False,
-                          'provider':{'allow_fallbacks':False,
-                                      'max_price':{'prompt':0,'completion':0,'request':0,'image':0}}})
-        except httpx.TimeoutException:
-            raise HTTPException(504, 'The selected OpenRouter model timed out. Try another model.')
-        except httpx.HTTPError:
-            raise HTTPException(503, 'Unable to connect to OpenRouter. Try again shortly.')
-        if response.status_code >= 400:
-            messages = {401:'OpenRouter rejected the API key. Update OPENROUTER_API_KEY on the server.',
+        keys = self._keys()
+        start = self._active_key_index % len(keys)
+        messages = {401:'OpenRouter rejected the API key. Update the OpenRouter keys on the server.',
                         402:'OpenRouter rejected this free-model request due to account limits. Choose another free model or use local Ollama.',
                         403:'OpenRouter denied this request. Check the account and model permissions.',
                         429:'This OpenRouter model is rate limited. Try another model or retry later.'}
-            raise HTTPException(502, messages.get(response.status_code,
-                'The selected OpenRouter model is unavailable. Try another model.'))
-        try:
-            data = response.json()
-            content = data['choices'][0]['message']['content']
-            if isinstance(content,list):
-                content = ''.join(p.get('text','') for p in content if isinstance(p,dict))
-            if not isinstance(content,str) or not content.strip():
-                raise ValueError('Empty answer')
-            return content.strip()
-        except (ValueError, KeyError, IndexError, TypeError):
-            raise HTTPException(502, 'OpenRouter returned no answer. Try another model.')
+        async with httpx.AsyncClient(timeout=180) as client:
+            for attempt in range(len(keys)):
+                index = (start + attempt) % len(keys)
+                headers = {'Authorization':'Bearer '+keys[index], 'X-Title':'Enterprise Knowledge Copilot'}
+                try:
+                    response = await client.post(f'{OPENROUTER_URL}/chat/completions', headers=headers,
+                        json={'model':model, 'messages':[{'role':'system','content':system},
+                              {'role':'user','content':prompt}], 'max_tokens':1024,
+                              'temperature':0.1, 'stream':False,
+                              'provider':{'allow_fallbacks':False,
+                                          'max_price':{'prompt':0,'completion':0,'request':0,'image':0}}})
+                except httpx.TimeoutException:
+                    last_error = HTTPException(504, 'The selected OpenRouter model timed out. Try another model.')
+                except httpx.HTTPError:
+                    last_error = HTTPException(503, 'Unable to connect to OpenRouter. Try again shortly.')
+                else:
+                    if response.status_code >= 400:
+                        last_error = HTTPException(502, messages.get(response.status_code,
+                            'The selected OpenRouter model is unavailable. Try another model.'))
+                    else:
+                        try:
+                            content = response.json()['choices'][0]['message']['content']
+                            if isinstance(content,list):
+                                content = ''.join(p.get('text','') for p in content if isinstance(p,dict))
+                            if not isinstance(content,str) or not content.strip():
+                                raise ValueError('Empty answer')
+                            self._active_key_index = index
+                            return content.strip()
+                        except (ValueError, KeyError, IndexError, TypeError):
+                            last_error = HTTPException(502, 'OpenRouter returned no answer. Try another model.')
+                self._active_key_index = (index + 1) % len(keys)
+        raise last_error
 
 
 model_service = ModelService()

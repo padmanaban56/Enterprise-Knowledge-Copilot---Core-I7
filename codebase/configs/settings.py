@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "phi3:mini"
     openrouter_api_key: SecretStr = SecretStr("")
+    openrouter_api_keys: SecretStr = SecretStr("")  # comma-separated failover keys; overrides the legacy key
     # P6: Level-2 LLM intent classifier model. qwen2.5:3b preferred (better
     # instruction following for classification); falls back to phi3:mini.
     intent_classifier_model: str = "qwen2.5:3b"

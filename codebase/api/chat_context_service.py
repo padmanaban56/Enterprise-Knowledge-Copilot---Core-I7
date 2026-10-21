@@ -54,7 +54,7 @@ class ChatContextService:
                 rows = conn.execute(text(f'SELECT d.doc_id::text,d.source_file,d.title,d.access_roles,COALESCE(r.name,d.department) AS repository FROM documents d LEFT JOIN repositories r ON r.repository_id=d.repository_id WHERE d.doc_id::text=ANY(:ids) AND {DOCUMENT_VISIBLE}'), {'ids':effective_ids, **visibility}).fetchall()
                 user_roles = {role.upper() for role in (roles or ['EMPLOYEE'])}
                 by_id = {r.doc_id:{'doc_id':r.doc_id,'filename':r.source_file or r.title,'repository':r.repository}
-                         for r in rows if is_admin or not r.access_roles or user_roles.intersection(role.upper() for role in r.access_roles)}
+                         for r in rows}
                 if set(by_id) != set(effective_ids):
                     raise HTTPException(400, 'A selected document is unavailable')
                 documents = [by_id[did] for did in effective_ids]

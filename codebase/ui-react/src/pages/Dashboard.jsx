@@ -56,6 +56,7 @@ export default function Dashboard() {
     ...(user?.access_roles || []).map(r => r.toUpperCase()),
   ])
   const isAdmin = ADMIN_ROLES.some(r => userRoles.has(r))
+  const consolidated = metrics?.scope === 'global'
 
   useEffect(() => {
     let active = true
@@ -99,7 +100,7 @@ export default function Dashboard() {
             {getGreeting()}, {user?.username?.split(' ')[0] || 'there'}!
           </h1>
           <p className="text-blue-200 text-sm max-w-lg leading-relaxed">
-            Your activity and the knowledge you can access. Search policies, procedures, and documentation.
+            {consolidated ? 'Organization-wide activity and knowledge overview.' : 'Your activity and the knowledge you can access. Search policies, procedures, and documentation.'}
           </p>
           <div className="mt-5 flex items-center gap-3">
             <button
@@ -120,7 +121,7 @@ export default function Dashboard() {
 
       {/* Period selector */}
       <div className="flex items-center justify-between">
-        <div className="text-sm font-medium text-slate-400">My Overview</div>
+        <div className="text-sm font-medium text-slate-400">{consolidated ? 'Organization Overview' : 'My Overview'}</div>
         <div className="flex gap-1">
           {[7, 14, 30].map(d => (
             <button key={d} onClick={() => setDays(d)}
@@ -133,20 +134,20 @@ export default function Dashboard() {
 
       {/* KPI row 1 */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard icon={FileText} label="Accessible Documents" value={metrics?.total_documents ?? '—'} color="brand" />
-        <StatCard icon={Database} label="Accessible Chunks" value={(metrics?.total_chunks ?? 0).toLocaleString()} color="blue" />
-        <StatCard icon={Ticket} label="My Tickets" value={(metrics?.total_tickets ?? 0).toLocaleString()} sub="Requested by me" color="amber" />
-        <StatCard icon={FolderOpen} label="Accessible Repositories" value={metrics?.total_repositories ?? 0} color="green" />
+        <StatCard icon={FileText} label={consolidated ? 'Total Documents' : 'Accessible Documents'} value={metrics?.total_documents ?? '—'} color="brand" />
+        <StatCard icon={Database} label={consolidated ? 'Total Chunks' : 'Accessible Chunks'} value={(metrics?.total_chunks ?? 0).toLocaleString()} color="blue" />
+        <StatCard icon={Ticket} label={consolidated ? 'Total Tickets' : 'My Tickets'} value={(metrics?.total_tickets ?? 0).toLocaleString()} sub={consolidated ? 'Across all departments' : 'Requested by me'} color="amber" />
+        <StatCard icon={FolderOpen} label={consolidated ? 'Total Repositories' : 'Accessible Repositories'} value={metrics?.total_repositories ?? 0} color="green" />
       </div>
 
-      {/* Personal metrics for every signed-in user, including administrators. */}
+      {/* Scope is selected by the server from the authenticated account. */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard icon={TrendingUp} label="My Queries" value={metrics?.total_queries ?? 0} sub={`Last ${days} days`} />
-        <StatCard icon={BarChart3} label="My Avg Confidence"
+        <StatCard icon={TrendingUp} label={consolidated ? 'Total Queries' : 'My Queries'} value={metrics?.total_queries ?? 0} sub={`Last ${days} days`} />
+        <StatCard icon={BarChart3} label={consolidated ? 'Avg Confidence' : 'My Avg Confidence'}
           value={`${((metrics?.avg_confidence ?? 0) * 100).toFixed(0)}%`}
           sub={metrics?.avg_confidence >= 0.65 ? '🟢 Good' : '🟡 Review'} />
-        <StatCard icon={Clock} label="My Avg Latency" value={`${metrics?.avg_latency_ms ?? 0}ms`} color="amber" />
-        <StatCard icon={ShieldCheck} label="My Pending Access Requests"
+        <StatCard icon={Clock} label={consolidated ? 'Avg Latency' : 'My Avg Latency'} value={`${metrics?.avg_latency_ms ?? 0}ms`} color="amber" />
+        <StatCard icon={ShieldCheck} label={consolidated ? 'Pending Access Requests' : 'My Pending Access Requests'}
           value={metrics?.access_request_count ?? 0}
           color={metrics?.access_request_count > 0 ? 'amber' : 'green'} />
       </div>
@@ -154,7 +155,7 @@ export default function Dashboard() {
       {/* Charts row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className="card p-5">
-          <div className="text-sm font-medium text-slate-300 mb-4">My Query Volume (last {days} days)</div>
+          <div className="text-sm font-medium text-slate-300 mb-4">{consolidated ? 'Total' : 'My'} Query Volume (last {days} days)</div>
           {dailyData.length > 0 ? (
             <ResponsiveContainer width="100%" height={200}>
               <BarChart data={dailyData}>
@@ -169,7 +170,7 @@ export default function Dashboard() {
         </div>
 
         <div className="card p-5">
-          <div className="text-sm font-medium text-slate-300 mb-4">My Query Intent Distribution</div>
+          <div className="text-sm font-medium text-slate-300 mb-4">{consolidated ? 'Organization' : 'My'} Query Intent Distribution</div>
           {intentData.length > 0 ? (
             <div className="flex items-center gap-4">
               <ResponsiveContainer width="50%" height={180}>
@@ -233,7 +234,7 @@ export default function Dashboard() {
       {metrics?.recent_queries?.length > 0 && (
         <div>
           <div className="text-sm font-medium text-slate-300 mb-3">
-            My Recent Queries
+            {consolidated ? 'Recent Queries Across All Users' : 'My Recent Queries'}
           </div>
           <div className="card overflow-hidden">
             <table className="w-full text-sm">
@@ -248,7 +249,7 @@ export default function Dashboard() {
               <tbody>
                 {metrics.recent_queries.slice(0, 8).map((q, i) => (
                   <tr key={i}
-                    onClick={() => q.session_id && navigate(`/chat?session=${q.session_id}`)}
+                    onClick={() => q.session_id && (!consolidated || q.user_id === user?.user_id) && navigate(`/chat?session=${q.session_id}`)}
                     className="border-b border-slate-700/30 hover:bg-slate-700/20 cursor-pointer transition-colors">
                     <td className="px-4 py-3 text-slate-300 truncate max-w-xs">{q.query_text}</td>
                     <td className="px-4 py-3"><ConfidenceBadge score={q.confidence || 0} /></td>

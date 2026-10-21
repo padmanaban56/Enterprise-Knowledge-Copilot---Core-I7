@@ -231,6 +231,8 @@ class VectorStore:
                 "hypothetical_questions": legacy_questions,
                 "ingested_at": now_iso,
                 # ── P3: metadata-flow fields (previously Postgres-only / missing) ──
+                "category": getattr(chunk, 'category', ''),
+                "ticket_id": getattr(chunk, 'ticket_id', ''),
                 "repository": getattr(chunk, "repository", "") or chunk.department or "Unknown",
                 "access_roles": getattr(chunk, "access_roles", None) or
                                 ["EMPLOYEE", "MANAGER", "HR", "FINANCE", "IT_ADMIN", "EXECUTIVE"],

@@ -290,7 +290,25 @@ async def change_password(req: ChangePasswordRequest, current_user: CurrentUser 
 
 
 # ── Access Requests (employee-initiated, admin-approved) ─────────────────────
-ACCESS_ROLE_OPTIONS = ["EMPLOYEE", "MANAGER", "HR", "FINANCE", "IT_ADMIN", "EXECUTIVE"]
+ACCESS_ROLE_OPTIONS = ["EMPLOYEE", "MANAGER", "HR", "IT", "ENGINEERING", "PROJECTS", "FINANCE", "IT_ADMIN", "EXECUTIVE"]
+
+
+@app.get('/access-requests/catalog')
+async def access_request_catalog(current_user: CurrentUser = Depends(get_current_user)):
+    """Names only for requesting access; never returns paths, chunks or content."""
+    from sqlalchemy import create_engine, text
+    roles = signed_in_roles(current_user)
+    with create_engine(settings.postgres_url).connect() as conn:
+        rows = conn.execute(text('SELECT d.doc_id::text,d.source_file,d.title,d.access_roles,r.name,r.display_name '
+            'FROM repositories r LEFT JOIN documents d USING(repository_id) ORDER BY r.name,d.source_file')).fetchall()
+    repositories = {}
+    for row in rows:
+        repo = repositories.setdefault(row.name, {'name':row.name,'display_name':row.display_name,'documents':[]})
+        if row.doc_id:
+            filename = (row.source_file or '').replace('\\', '/').rsplit('/', 1)[-1]
+            repo['documents'].append({'doc_id':row.doc_id,'source_file':filename,'title':row.title,
+                'has_access':payload_visible({'doc_id':row.doc_id,'repository':row.name,'access_roles':row.access_roles}, roles)})
+    return {'repositories':[{**r,'document_count':len(r['documents'])} for r in repositories.values()]}
 
 
 @app.get("/access-requests")
@@ -312,11 +330,12 @@ async def create_access_request(req: CreateAccessRequestModel, current_user: Cur
     """Employee: request an additional access role (e.g. FINANCE, HR)."""
     if current_user.user_id == "anonymous":
         raise HTTPException(status_code=401, detail="Authentication required")
-    if req.resource_name.upper() not in ACCESS_ROLE_OPTIONS:
+    is_file = req.resource_type == 'file' or req.resource_name.upper().startswith('FILE:')
+    if not is_file and req.resource_name.upper() not in ACCESS_ROLE_OPTIONS:
         raise HTTPException(status_code=400, detail=f"resource_name must be one of {ACCESS_ROLE_OPTIONS}")
     result = get_auth_service().create_access_request(
-        user_id=current_user.user_id, resource_name=req.resource_name.upper(),
-        justification=req.justification, resource_type=req.resource_type,
+        user_id=current_user.user_id, resource_name=req.resource_name if is_file else req.resource_name.upper(),
+        justification=req.justification, resource_type='file' if is_file else req.resource_type,
     )
     get_auth_service().log_audit(user_id=current_user.user_id, action="access_request",
                                   query_text=f"Requested {req.resource_name.upper()}: {req.justification[:100]}")
@@ -450,17 +469,17 @@ class ChatResponse(BaseModel):
     citation_status: str = 'grounded'
 
 
-def _non_document_chat(req, current_user, reply):
+def _non_document_chat(req, current_user, reply, intent='OUT_OF_SCOPE'):
     session_id = req.session_id or str(uuid.uuid4())
     if chat_history_service and current_user.user_id != 'anonymous':
         chat_history_service.ensure_session(session_id, current_user.user_id, req.query)
         chat_history_service.add_message(session_id, current_user.user_id, role='user', content=req.query)
         chat_history_service.add_message(session_id, current_user.user_id, role='assistant', content=reply,
-            citations=[], confidence=0, retrieval_meta={'intent': 'OUT_OF_SCOPE', 'citation_status': 'not_applicable'})
+            citations=[], confidence=0, retrieval_meta={'intent': intent, 'citation_status': 'not_applicable'})
     return ChatResponse(answer=reply, citations=[], confidence=0, confidence_label='NO_SOURCES',
         confidence_breakdown={}, chunks_used=0, low_confidence=True, latency_ms=0,
         session_id=session_id, repositories_searched=[], expanded_queries=[], sub_queries=[],
-        intent='OUT_OF_SCOPE', hyde_used=False, retrieval_transparency=[], pipeline_trace=[],
+        intent=intent, hyde_used=False, retrieval_transparency=[], pipeline_trace=[],
         pipeline_stats={}, citation_status='not_applicable')
 
 
@@ -646,13 +665,17 @@ async def _run_chat(req: ChatRequest, current_user: CurrentUser):
     ):
         try:
             exact_rows = ticket_retriever.search(
-                query=req.query, ticket_ids=query_ctx.ticket_ids, top_k=5,
+                query=req.query, ticket_ids=query_ctx.ticket_ids, top_k=5, rbac_roles=rbac_roles,
             )
         except Exception as e:
             logger.warning(f"Exact ticket-ID lookup failed: {e}")
             exact_rows = []
 
         exact_rows = [ticket for ticket in exact_rows if ticket_visible(ticket, rbac_roles)]
+        if not exact_rows:
+            return _non_document_chat(req, current_user,
+                'I could not find an accessible ticket with that ID. Please check the ticket ID or request access from your administrator.',
+                intent='TICKET_LOOKUP')
         if exact_rows:
             latency_ms = int((time.time() - t_start) * 1000)
             answer = _format_ticket_answer(exact_rows)
@@ -825,6 +848,7 @@ async def _run_chat(req: ChatRequest, current_user: CurrentUser):
             ticket_ids=query_ctx.ticket_ids,
             filters=query_ctx.filters,
             vector_store=hybrid_engine.vector_store,
+            rbac_roles=rbac_roles,
         )
         ticket_candidates = ticket_path["candidates"]
         result.pipeline_stats["ticket_dual_path"] = ticket_path["stats"]
@@ -855,6 +879,7 @@ async def _run_chat(req: ChatRequest, current_user: CurrentUser):
                     query=req.query,
                     filters=query_ctx.filters,
                     vector_store=hybrid_engine.vector_store,
+                    rbac_roles=rbac_roles,
                 )
                 ticket_candidates = ticket_path["candidates"] or ticket_candidates
                 result.pipeline_stats["ticket_fallback"] = ticket_path["stats"]
@@ -1119,6 +1144,25 @@ async def list_chat_sessions(current_user: CurrentUser = Depends(get_current_use
     return {"sessions": chat_history_service.list_sessions(current_user.user_id)}
 
 
+class RenameChatRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+
+
+@app.patch('/chat/sessions/{session_id}')
+async def rename_chat_session(session_id: uuid.UUID, req: RenameChatRequest,
+                              current_user: CurrentUser = Depends(get_current_user)):
+    signed_in_roles(current_user)
+    title = req.title.strip()
+    if not title:
+        raise HTTPException(400, 'Enter a chat name')
+    if not chat_history_service:
+        raise HTTPException(503, 'Chat history service unavailable')
+    session = chat_history_service.rename_session(str(session_id),current_user.user_id,title)
+    if not session:
+        raise HTTPException(404, 'Conversation not found')
+    return session
+
+
 @app.get("/chat/sessions/{session_id}/messages")
 async def get_chat_session_messages(session_id: str, current_user: CurrentUser = Depends(get_current_user)):
     """
@@ -1172,6 +1216,7 @@ def _tickets_to_chunks(tickets: List[dict], limit: int = 3) -> List[RetrievedChu
             section_title=t.get("subject") or "Resolved Ticket",
             page_number=0,
             doc_type="Ticket",
+            category=category, ticket_id=ticket_id,
             department=category,
             doc_origin="INTERNAL",
             priority_tier=1,            # resolved ITSM tickets = Tier 1 (LLD §4.3)
@@ -1433,7 +1478,7 @@ async def resolve_gap(gap_id: str):
 
 
 # ── Evaluation metrics ─────────────────────────────────────────────────────────
-@app.get("/analytics/evaluation", dependencies=[Depends(require_roles('ADMIN', 'IT_ADMIN', 'EXECUTIVE'))])
+@app.get("/analytics/evaluation", dependencies=[Depends(require_roles('ADMIN'))])
 async def evaluation_metrics(days: int = 7):
     """Full retrieval evaluation: Precision@5, Recall@5, MRR, Hit Rate."""
     if not rag_evaluator:
@@ -1594,6 +1639,9 @@ async def _run_ticket_ingest_job(job_id: str, content: bytes, filename: str):
             chunk = Chunk(
                 chunk_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, ticket_id)),
                 doc_id=str(uuid.uuid5(uuid.NAMESPACE_DNS, f"tickets_{category}")),
+                category=category, ticket_id=ticket_id,
+                repository=_map_category_to_dept(category),
+                access_roles=repository_roles(_map_category_to_dept(category)),
                 chunk_index=inserted,
                 content=content_text,
                 section_title=subject[:100],
@@ -1619,7 +1667,8 @@ async def _run_ticket_ingest_job(job_id: str, content: bytes, filename: str):
                     {"chunk_id": c.chunk_id, "doc_id": c.doc_id, "content": c.content,
                      "section_title": c.section_title, "doc_type": c.doc_type,
                      "department": c.department, "doc_origin": c.doc_origin,
-                     "priority_tier": c.priority_tier, "source_file": filename}
+                     "priority_tier": c.priority_tier, "source_file": filename,
+                     "repository":c.repository,"access_roles":c.access_roles,"category":c.category,"ticket_id":c.ticket_id}
                     for c in chunks
                 ])
                 chunks = []
@@ -1638,7 +1687,8 @@ async def _run_ticket_ingest_job(job_id: str, content: bytes, filename: str):
                 {"chunk_id": c.chunk_id, "doc_id": c.doc_id, "content": c.content,
                  "section_title": c.section_title, "doc_type": c.doc_type,
                  "department": c.department, "doc_origin": c.doc_origin,
-                 "priority_tier": c.priority_tier, "source_file": filename}
+                 "priority_tier": c.priority_tier, "source_file": filename,
+                 "repository":c.repository,"access_roles":c.access_roles,"category":c.category,"ticket_id":c.ticket_id}
                 for c in chunks
             ])
         _flush_pg(pg_rows)
@@ -1689,13 +1739,8 @@ async def ingest_tickets(file: UploadFile = File(...)):
 
 
 def _map_category_to_dept(category: str) -> str:
-    mapping = {
-        "Network": "IT", "Hardware": "IT", "Software": "IT",
-        "Access": "IT", "Email": "IT", "Security": "IT",
-        "HR": "HR", "Payroll": "HR", "Leave": "HR",
-        "Finance": "Finance", "Billing": "Finance",
-    }
-    return mapping.get(category, "IT")
+    from api.access_control import ticket_repository
+    return ticket_repository(category)
 
 
 # ── v2: Repository endpoints ───────────────────────────────────────────────────
@@ -1763,8 +1808,7 @@ async def list_documents(
         else:
             docs = [
                 d for d in all_docs
-                if not d.get("access_roles")  # no restriction = visible to all
-                or (set(r.upper() for r in d["access_roles"]) & user_roles)
+                if payload_visible(d, user_roles)
             ]
         return {"documents": docs, "total": len(docs)}
     except Exception as e:
@@ -1811,12 +1855,8 @@ async def get_document(
 
     doc = dict(row._mapping)
 
-    if not is_admin:
-        access_roles = doc.get("access_roles")
-        if access_roles and not (set(r.upper() for r in access_roles) & user_roles):
-            raise HTTPException(403, "You don't have access to this document")
-        if doc.get('repository') not in allowed_repositories(user_roles):
-            raise HTTPException(403, "You don't have access to this repository")
+    if not payload_visible(doc, user_roles):
+        raise HTTPException(403, "You don't have access to this document")
 
     chunks = []
     if vector_store:
@@ -1878,12 +1918,8 @@ async def get_document_file(
     if not row:
         raise HTTPException(404, "Document not found")
 
-    if not is_admin:
-        access_roles = row.access_roles
-        if access_roles and not (set(r.upper() for r in access_roles) & user_roles):
-            raise HTTPException(403, "You don't have access to this document")
-        if row.repository not in allowed_repositories(user_roles):
-            raise HTTPException(403, "You don't have access to this repository")
+    if not payload_visible({**dict(row._mapping), 'doc_id':doc_id}, user_roles):
+        raise HTTPException(403, "You don't have access to this document")
 
     if not row.file_path or not os.path.exists(row.file_path):
         raise HTTPException(404, "Original file not available for this document")
@@ -2017,6 +2053,16 @@ async def search_tickets_v2(
     return result
 
 
+@app.get('/tickets')
+async def ticket_page(q: str = '', category: Optional[str] = None, priority: Optional[str] = None,
+                      page: int = Query(default=1, ge=1), page_size: int = Query(default=20, ge=1, le=100),
+                      current_user: CurrentUser = Depends(get_current_user)):
+    roles = signed_in_roles(current_user)
+    if not ticket_intelligence:
+        raise HTTPException(503, 'Ticket intelligence unavailable')
+    return ticket_intelligence.get_page(q.strip(), category, priority, page, page_size, user_roles=roles)
+
+
 @app.get("/tickets/recent")
 async def recent_tickets(limit: int = Query(default=20, ge=1, le=100), category: Optional[str] = None,
                          current_user: CurrentUser = Depends(get_current_user)):
@@ -2042,7 +2088,7 @@ async def ticket_categories(current_user: CurrentUser = Depends(get_current_user
 # ── v2: Analytics endpoints ────────────────────────────────────────────────────
 @app.get("/analytics/dashboard")
 async def analytics_dashboard(days: int = Query(default=7, ge=1, le=365), current_user: CurrentUser = Depends(get_current_user)):
-    """Personal query metrics and role-filtered knowledge totals; sign-in required."""
+    """ADMIN sees consolidated metrics; other accounts see personal metrics."""
     roles = signed_in_roles(current_user)
     if not analytics_service:
         raise HTTPException(503, "Analytics service unavailable")
@@ -2053,7 +2099,7 @@ async def analytics_dashboard(days: int = Query(default=7, ge=1, le=365), curren
         raise HTTPException(503, 'Dashboard metrics are temporarily unavailable')
 
 
-@app.get("/analytics/evaluation/summary", dependencies=[Depends(require_roles('ADMIN', 'IT_ADMIN', 'EXECUTIVE'))])
+@app.get("/analytics/evaluation/summary", dependencies=[Depends(require_roles('ADMIN'))])
 async def evaluation_metrics():
     """Retrieval evaluation: hit rate, confidence distribution, P95 latency."""
     if not analytics_service:

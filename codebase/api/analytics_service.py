@@ -69,13 +69,15 @@ class AnalyticsService:
 
     def get_dashboard_metrics(self, days: int = 7, *, user_id: str,
                               user_roles: Optional[List[str]] = None, user_email: Optional[str] = None) -> Dict:
-        """Personal activity plus the signed-in user's accessible knowledge totals."""
+        """Consolidated activity for ADMIN; personal activity for all other users."""
         if not user_id or user_id == 'anonymous':
             raise ValueError('A signed-in user is required for dashboard metrics')
         from api.access_control import DOCUMENT_VISIBLE, REPOSITORY_VISIBLE, access_parameters
         since = datetime.utcnow() - timedelta(days=days)
         activity_params = {'since': since, 'uid': user_id}
         visibility_params = access_parameters(user_roles)
+        consolidated = 'ADMIN' in {str(role).upper() for role in (user_roles or [])}
+        activity_where = 'timestamp > :since' + ('' if consolidated else ' AND user_id = :uid')
         try:
             with self.engine.connect() as conn:
                 # Overall stats
@@ -85,13 +87,13 @@ class AnalyticsService:
                     "AVG(latency_ms) as avg_latency, "
                     "AVG(chunks_retrieved) as avg_chunks, "
                     "SUM(CASE WHEN low_confidence THEN 1 ELSE 0 END) as low_conf_count "
-                    "FROM retrieval_analytics WHERE timestamp > :since AND user_id = :uid"
+                    f"FROM retrieval_analytics WHERE {activity_where}"
                 ), activity_params).fetchone()
 
                 # Repository usage
                 repo_usage = conn.execute(text(
                     "SELECT unnest(repositories_searched) as repo, COUNT(*) as queries "
-                    "FROM retrieval_analytics WHERE timestamp > :since AND user_id = :uid "
+                    f"FROM retrieval_analytics WHERE {activity_where} "
                     "GROUP BY repo ORDER BY queries DESC"
                 ), activity_params)
                 repo_data = [dict(r._mapping) for r in repo_usage]
@@ -100,7 +102,7 @@ class AnalyticsService:
                 daily = conn.execute(text(
                     "SELECT DATE(timestamp) as day, COUNT(*) as queries, "
                     "AVG(confidence) as avg_conf "
-                    "FROM retrieval_analytics WHERE timestamp > :since AND user_id = :uid "
+                    f"FROM retrieval_analytics WHERE {activity_where} "
                     "GROUP BY DATE(timestamp) ORDER BY day"
                 ), activity_params)
                 daily_data = [dict(r._mapping) for r in daily]
@@ -108,14 +110,14 @@ class AnalyticsService:
                 # Intent distribution
                 intents = conn.execute(text(
                     "SELECT intent, COUNT(*) as count "
-                    "FROM retrieval_analytics WHERE timestamp > :since AND user_id = :uid "
+                    f"FROM retrieval_analytics WHERE {activity_where} "
                     "GROUP BY intent ORDER BY count DESC"
                 ), activity_params)
                 intent_data = [dict(r._mapping) for r in intents]
 
                 top_queries = conn.execute(text(
-                    "SELECT query_text, confidence, latency_ms, timestamp, session_id "
-                    "FROM retrieval_analytics WHERE timestamp > :since AND user_id = :uid "
+                    "SELECT query_text, confidence, latency_ms, timestamp, session_id, user_id "
+                    f"FROM retrieval_analytics WHERE {activity_where} "
                     "ORDER BY timestamp DESC LIMIT 10"
                 ), activity_params)
                 recent_queries = [dict(r._mapping) for r in top_queries]
@@ -128,6 +130,7 @@ class AnalyticsService:
                 ), visibility_params).fetchone()
 
                 ticket_count = conn.execute(text(
+                    "SELECT COUNT(*) FROM tickets" if consolidated else
                     "SELECT COUNT(*) FROM tickets WHERE :email <> '' AND LOWER(requester_email) = LOWER(:email)"
                 ), {'email': user_email or ''}).scalar() or 0
                 repo_count = conn.execute(text(
@@ -135,13 +138,14 @@ class AnalyticsService:
                 ), visibility_params).scalar() or 0
 
                 access_request_count = conn.execute(text(
-                    "SELECT COUNT(*) FROM access_requests WHERE status = 'pending' AND user_id = :uid"
+                    "SELECT COUNT(*) FROM access_requests WHERE status = 'pending'" +
+                    ('' if consolidated else ' AND user_id = :uid')
                 ), {'uid': user_id}).scalar() or 0
 
                 s = dict(stats._mapping) if stats else {}
                 return {
                     "period_days": days,
-                    "scope": "user",
+                    "scope": "global" if consolidated else "user",
                     "total_queries": int(s.get("total_queries") or 0),
                     "avg_confidence": round(float(s.get("avg_confidence") or 0), 3),
                     "avg_latency_ms": round(float(s.get("avg_latency") or 0)),
@@ -235,7 +239,9 @@ class ChatHistoryService:
                     "INSERT INTO chat_sessions (session_id, user_id, title) "
                     "VALUES (:sid, :uid, :title) "
                     "ON CONFLICT (session_id) DO UPDATE SET updated_at = NOW(), "
-                    "title = CASE WHEN chat_sessions.title='New Chat' THEN EXCLUDED.title ELSE chat_sessions.title END "
+                    "title = CASE WHEN chat_sessions.title='New Chat' AND NOT EXISTS "
+                    "(SELECT 1 FROM chat_messages WHERE session_id=chat_sessions.session_id AND role='user') "
+                    "THEN EXCLUDED.title ELSE chat_sessions.title END "
                     "WHERE chat_sessions.user_id=EXCLUDED.user_id"
                 ), {"sid": session_id, "uid": user_id, "title": title})
         except Exception as e:
@@ -291,12 +297,23 @@ class ChatHistoryService:
         with self.engine.connect() as conn:
             rows = conn.execute(text(
                 "SELECT cs.session_id, cs.title, cs.created_at, cs.updated_at, "
-                "(SELECT COUNT(*) FROM chat_messages cm WHERE cm.session_id = cs.session_id) as message_count "
+                "(SELECT COUNT(*) FROM chat_messages cm WHERE cm.session_id = cs.session_id AND cm.role IN ('user','assistant')) as message_count "
                 "FROM chat_sessions cs "
                 "WHERE cs.user_id = :uid "
+                "AND EXISTS (SELECT 1 FROM chat_messages cm WHERE cm.session_id=cs.session_id AND cm.role='user') "
+                "AND EXISTS (SELECT 1 FROM chat_messages cm WHERE cm.session_id=cs.session_id AND cm.role='assistant') "
                 "ORDER BY cs.updated_at DESC LIMIT :limit"
             ), {"uid": user_id, "limit": limit})
             return [dict(r._mapping) for r in rows]
+
+    def rename_session(self, session_id: str, user_id: str, title: str):
+        with self.engine.begin() as conn:
+            row = conn.execute(text(
+                'UPDATE chat_sessions cs SET title=:title WHERE session_id=:sid AND user_id=:uid '
+                "AND EXISTS (SELECT 1 FROM chat_messages cm WHERE cm.session_id=cs.session_id AND cm.role='user') "
+                "AND EXISTS (SELECT 1 FROM chat_messages cm WHERE cm.session_id=cs.session_id AND cm.role='assistant') "
+                'RETURNING session_id,title'), {'sid':session_id,'uid':user_id,'title':title}).fetchone()
+            return dict(row._mapping) if row else None
 
     def get_session_messages(self, session_id: str, user_id: str) -> Optional[List[Dict]]:
         """

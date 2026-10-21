@@ -136,6 +136,7 @@ class AgentOrchestrator:
             ticket_ids=ticket_ids or None,
             filters={},
             vector_store=self.hybrid_engine.vector_store,
+            rbac_roles=rbac_roles,
         )
         if rbac_roles is not None:
             from api.access_control import ticket_visible

@@ -100,6 +100,8 @@ export const api = {
   },
   recentTickets: (limit = 20) => request(`/tickets/recent?limit=${limit}`),
   ticketCategories: () => request('/tickets/categories'),
+  ticketPage: ({ q = '', category = '', priority = '', page = 1, pageSize = 20 }) =>
+    request(`/tickets?${new URLSearchParams({ q, category, priority, page, page_size: pageSize })}`),
 
   // ── Feedback ─────────────────────────────────────────────────────────────────
   submitFeedback: (body) => request('/feedback', { method: 'POST', body: JSON.stringify(body) }),
@@ -132,11 +134,13 @@ export const api = {
 
   // ── Chat History ─────────────────────────────────────────────────────────────
   listChatSessions: () => request('/chat/sessions'),
+  renameChatSession: (id, title) => request(`/chat/sessions/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
   getChatSessionMessages: (sessionId) => request(`/chat/sessions/${sessionId}/messages`),
   updateChatContext: (sessionId, body) => request(`/chat/sessions/${sessionId}/context`, { method: 'POST', body: JSON.stringify(body) }),
 
   // ── Access Requests ───────────────────────────────────────────────────────────
   myAccessRequests: () => request('/access-requests'),
+  accessRequestCatalog: () => request('/access-requests/catalog'),
   allAccessRequests: () => request('/access-requests/all'),
   createAccessRequest: (body) => request('/access-requests', { method: 'POST', body: JSON.stringify(body) }),
   resolveAccessRequest: (id, body) => request(`/access-requests/${id}/resolve`, { method: 'POST', body: JSON.stringify(body) }),

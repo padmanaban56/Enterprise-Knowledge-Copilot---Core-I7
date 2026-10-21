@@ -61,7 +61,6 @@ export default function DocumentSource() {
       {state.loading && <p role="status" className="text-slate-400">Opening source document…</p>}
       {state.error && <div role="alert" className="card p-4 text-slate-300">
         <p>{state.error}</p>
-        {state.doc && <p className="mt-2">You can still read the indexed content in Document details.</p>}
         {!state.doc && <Link className="text-brand-300 underline" to="/documents">Browse documents</Link>}
       </div>}
       {state.url && (state.pdf

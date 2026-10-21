@@ -107,6 +107,8 @@ class BM25Store:
             self._tokenized_corpus.append(tokens)
             self._corpus_meta.append({
                 "chunk_id": chunk["chunk_id"],
+                "category": chunk.get('category', ''),
+                "ticket_id": chunk.get('ticket_id', ''),
                 "doc_id": chunk.get("doc_id", ""),
                 "content": chunk.get("content", ""),
                 "section_title": chunk.get("section_title", ""),

@@ -80,6 +80,31 @@ class DashboardAccessTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DashboardServiceTests(unittest.TestCase):
+    def test_only_admin_gets_consolidated_activity_and_counts(self):
+        for roles, global_expected in [(['ADMIN'],True),(['HR'],False),(['IT'],False),
+                                      (['FINANCE'],False),(['ENGINEERING','PROJECTS'],False),
+                                      (['IT_ADMIN'],False),(['EXECUTIVE'],False)]:
+            service = AnalyticsService.__new__(AnalyticsService)
+            service.engine = MagicMock()
+            conn = service.engine.connect.return_value.__enter__.return_value
+            scalar = MagicMock()
+            scalar.scalar.return_value = 2
+            stats = MagicMock()
+            stats.fetchone.return_value = SimpleNamespace(_mapping={'total_queries':3,'avg_confidence':.8})
+            docs = MagicMock()
+            docs.fetchone.return_value = SimpleNamespace(docs=4,chunks=40)
+            conn.execute.side_effect = [stats,[],[],[],[],docs,scalar,scalar,scalar]
+            result = service.get_dashboard_metrics(user_id='current-user',user_roles=roles,user_email='mine@test')
+            self.assertEqual(result['scope'],'global' if global_expected else 'user')
+            for call in conn.execute.call_args_list[:5]:
+                sql = str(call.args[0])
+                self.assertEqual('user_id = :uid' in sql, not global_expected)
+                self.assertIn('timestamp > :since',sql)
+            ticket_sql = str(conn.execute.call_args_list[6].args[0])
+            request_sql = str(conn.execute.call_args_list[8].args[0])
+            self.assertEqual('requester_email' in ticket_sql, not global_expected)
+            self.assertEqual('user_id = :uid' in request_sql, not global_expected)
+
     def test_missing_identity_cannot_fall_back_to_global_metrics(self):
         service = AnalyticsService.__new__(AnalyticsService)
         service.engine = MagicMock()

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { useSearchParams, useNavigate } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   Search,
   FileText,
@@ -10,6 +10,8 @@ import {
   ChevronDown
 } from 'lucide-react'
 import { api } from '../services/api'
+import { citationHref } from '../services/citations'
+import { documentFilename } from '../services/documentNames'
 import { useAuth } from '../context/AuthContext'
 
 const REPO_COLORS = {
@@ -28,7 +30,7 @@ const ACCESS_ROLE_OPTIONS = ['EMPLOYEE','MANAGER','HR','FINANCE','IT_ADMIN','EXE
 const ADMIN_ROLES = ['ADMIN','IT_ADMIN','EXECUTIVE']
 
 function docDisplayName(doc) {
-  return doc.source_file?.split('/').pop() || doc.title || 'Untitled'
+  return documentFilename(doc)
 }
 
 /* ================= CUSTOM DROPDOWN ================= */
@@ -124,7 +126,6 @@ function AccessRolesEditor({ value, onChange }) {
 
 /* ================= MAIN ================= */
 export default function Documents() {
-  const navigate = useNavigate()
   const { user } = useAuth()
 
   const [docs, setDocs] = useState([])
@@ -223,8 +224,12 @@ export default function Documents() {
 
                 {/* NAME */}
                 <td className="p-3">
-                  <div className="text-slate-200">{docDisplayName(doc)}</div>
-                  <div className="text-xs text-slate-500">{doc.doc_id}</div>
+                  <Link
+                    to={citationHref({ doc_id: doc.doc_id, source: docDisplayName(doc), repository: doc.repository })}
+                    className="text-brand-300 hover:text-brand-200 hover:underline focus-visible:underline"
+                  >
+                    {docDisplayName(doc)}
+                  </Link>
                 </td>
 
                 {/* REPO */}

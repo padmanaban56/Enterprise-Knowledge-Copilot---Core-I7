@@ -4,7 +4,7 @@ scripts/bulk_ingest.py  —  Bulk ingest a folder of PDFs/DOCX/PPTX files
 Usage:
   python scripts/bulk_ingest.py --folder /path/to/gitlab/handbooks
   python scripts/bulk_ingest.py --folder ./data --department Operations
-  python scripts/bulk_ingest.py --tickets tickets.csv
+  python scripts/bulk_ingest.py --tickets "input/IT Tickets/merged_tickets_realistic.csv"
 
 The script talks to the running FastAPI backend.
 """

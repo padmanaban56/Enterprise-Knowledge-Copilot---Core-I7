@@ -187,6 +187,41 @@ class TicketIntelligence:
             result = conn.execute(text(f"SELECT COUNT(*) FROM tickets WHERE {TICKET_VISIBLE}"), access_parameters(user_roles))
             return result.scalar() or 0
 
+    def get_page(self, query='', category=None, priority=None, page=1, page_size=20, *, user_roles=None):
+        query = query.strip()
+        clauses = [TICKET_VISIBLE]
+        params = access_parameters(user_roles)
+        if query:
+            params['q'] = query
+        for key, value in [('category', category), ('priority', priority)]:
+            if value:
+                clauses.append(f'{key}=:{key}')
+                params[key] = value
+        base_where = ' AND '.join(clauses)
+        match_type = 'all'
+        with self.engine.connect() as conn:
+            exact = "(LOWER(ticket_id)=LOWER(:q) OR LOWER(TRIM(subject))=LOWER(:q))"
+            exact_count = conn.execute(text(f'SELECT COUNT(*) FROM tickets WHERE {base_where} AND {exact}'),params).scalar() if query else 0
+            if exact_count:
+                match_type = 'exact'
+                where = f'{base_where} AND {exact}'
+                total = exact_count
+            else:
+                match_type = 'keywords' if query else 'all'
+                search = "(fts_vector @@ plainto_tsquery('english', :q) OR POSITION(LOWER(:q) IN LOWER(subject))>0)"
+                where = base_where + (f' AND {search}' if query else '')
+                total = conn.execute(text(f'SELECT COUNT(*) FROM tickets WHERE {where}'), params).scalar() or 0
+            total_pages = (total + page_size - 1) // page_size
+            page = min(page, max(1, total_pages))
+            params.update(limit=page_size, offset=(page-1)*page_size)
+            order = "ts_rank(fts_vector, plainto_tsquery('english', :q)) DESC," if query else ''
+            rows = conn.execute(text('SELECT ticket_id,subject,description,priority,category,status,resolution,'
+                f'requester_email,created_at,resolved_at FROM tickets WHERE {where} '
+                f'ORDER BY {order} created_at DESC NULLS LAST,ticket_id LIMIT :limit OFFSET :offset'), params)
+            tickets = [dict(row._mapping) for row in rows]
+        return {'tickets':tickets, 'total':total, 'page':page, 'page_size':page_size, 'total_pages':total_pages,
+                'match_type':match_type}
+
     # ── Private helpers ────────────────────────────────────────────────────────
     def _extract_symptoms(self, query: str) -> List[str]:
         """Extract meaningful symptom words from query for matching."""

@@ -143,6 +143,8 @@ class RetrievedChunk:
     # ── P9: image-aware retrieval ──
     is_image_chunk: bool = False
     image_path: str = ""
+    category: str = ""
+    ticket_id: str = ""
 
 
 @dataclass
@@ -490,7 +492,32 @@ class HybridRetrievalEngine:
             for r in results:
                 r["retrieval_source"] = "bm25"
             all_bm25.extend(results)
+        # File grants supplement department access without widening repository roles.
+        from api.access_control import granted_document_ids, payload_visible
+        granted_ids = granted_document_ids(rbac_roles)
+        if query_ctx.active_document_ids and not skip_doc_scope:
+            granted_ids = [did for did in granted_ids if did in query_ctx.active_document_ids]
+        if granted_ids:
+            grant_filters = {k:v for k,v in qdrant_filters.items() if k not in ('access_roles','repository','doc_id')}
+            grant_filters['doc_id'] = granted_ids
+            if scope_repository:
+                grant_filters['repository'] = scope_repository
+            grant_dense = self.vector_store.search(query=primary_query, top_k=settings.dense_top_k,
+                filters=grant_filters, vector_name='content')
+            for item in grant_dense:
+                item['retrieval_source'] = 'dense'
+            dense_results = self._dedup_by_chunk_id(dense_results + grant_dense, settings.dense_top_k)
+            grant_bm25 = self.bm25_store.search(bm25_query, top_k=settings.bm25_top_k,
+                doc_ids=granted_ids, repository=scope_repository, department=scope_department)
+            for item in grant_bm25:
+                item['retrieval_source'] = 'bm25'
+            all_bm25.extend(grant_bm25)
         bm25_results = self._dedup_by_chunk_id(all_bm25, settings.bm25_top_k)
+        if rbac_roles is not None:
+            dense_results = [r for r in dense_results if payload_visible(r.get('payload', r), rbac_roles)]
+            question_results = [r for r in question_results if payload_visible(r.get('payload', r), rbac_roles)]
+            summary_results = [r for r in summary_results if payload_visible(r.get('payload', r), rbac_roles)]
+            bm25_results = [r for r in bm25_results if payload_visible(r.get('payload', r), rbac_roles)]
 
         # ── P1: DEBUG LOG — stage 1: raw retrieval counts ──────────────────────
         logger.info(
@@ -689,6 +716,7 @@ class HybridRetrievalEngine:
                 section_title=section_title if section_title is not None else (p.get("section_title") or ""),
                 page_number=page_number if page_number is not None else (p.get("page_number") or 0),
                 doc_type=p.get("doc_type", ""),
+                category=p.get('category', ''), ticket_id=p.get('ticket_id', ''),
                 department=p.get("department", ""),
                 doc_origin=p.get("doc_origin", "INTERNAL"),
                 priority_tier=p.get("priority_tier", 3),
@@ -1024,6 +1052,7 @@ class HybridRetrievalEngine:
                 section_title=p.get("section_title", ""),
                 page_number=p.get("page_number", 0),
                 doc_type=p.get("doc_type", ""),
+                category=p.get('category', ''), ticket_id=p.get('ticket_id', ''),
                 department=p.get("department", ""),
                 doc_origin=p.get("doc_origin", "INTERNAL"),
                 priority_tier=p.get("priority_tier", 3),
@@ -1096,6 +1125,8 @@ class HybridRetrievalEngine:
             "chunk_id": chunk.chunk_id,
             "doc_id": chunk.doc_id,
             "doc_type": chunk.doc_type,
+            "ticket_id": chunk.ticket_id,
+            "category": chunk.category,
             "project_id": chunk.project_id,
             "uploaded_by": chunk.uploaded_by,
             "access_roles": chunk.access_roles,
@@ -1272,15 +1303,18 @@ class TicketRetriever:
         query: str,
         ticket_ids: Optional[List[str]] = None,
         top_k: int = 5,
+        rbac_roles=None,
     ) -> List[Dict]:
+        from api.access_control import TICKET_VISIBLE, access_parameters
+        params = {**access_parameters(rbac_roles), 'limit':top_k}
         with self.engine.connect() as conn:
             if ticket_ids:
                 sql = self._text(
                     "SELECT ticket_id, subject, description, priority, "
                     "category, status, resolution, created_at "
-                    "FROM tickets WHERE ticket_id = ANY(:ids) LIMIT :limit"
+                    f"FROM tickets WHERE ticket_id = ANY(:ids) AND {TICKET_VISIBLE} ORDER BY ticket_id LIMIT :limit"
                 )
-                rows = conn.execute(sql, {"ids": ticket_ids, "limit": top_k})
+                rows = conn.execute(sql, {**params, "ids": ticket_ids})
             else:
                 sql = self._text(
                     "SELECT ticket_id, subject, description, priority, "
@@ -1288,9 +1322,9 @@ class TicketRetriever:
                     "ts_rank(fts_vector, plainto_tsquery('english', :q)) as rank "
                     "FROM tickets "
                     "WHERE fts_vector @@ plainto_tsquery('english', :q) "
-                    "ORDER BY rank DESC LIMIT :limit"
+                    f"AND {TICKET_VISIBLE} ORDER BY rank DESC,ticket_id LIMIT :limit"
                 )
-                rows = conn.execute(sql, {"q": query, "limit": top_k})
+                rows = conn.execute(sql, {**params, "q": query})
             return [dict(row._mapping) for row in rows]
 
     # ══════════════════════════════════════════════════════════════════════
@@ -1308,7 +1342,9 @@ class TicketRetriever:
         vector_store=None,
         top_k: int = 5,
         sql_min_results: int = 2,
+        rbac_roles=None,
     ) -> Dict[str, Any]:
+        from api.access_control import allowed_repositories
         filters = filters or {}
         stats = {
             "exact_match": False,
@@ -1320,38 +1356,28 @@ class TicketRetriever:
         # 5.1 Exact ticket ID match — fast PK lookup
         exact_results: List[Dict] = []
         if ticket_ids:
-            exact_results = self.search(query=query, ticket_ids=ticket_ids, top_k=top_k)
+            exact_results = self.search(query=query, ticket_ids=ticket_ids, top_k=top_k, rbac_roles=rbac_roles)
             stats["exact_match"] = len(exact_results) > 0
 
         # 5.2 Full-text SQL + structured filters
         sql_results: List[Dict] = []
-        if not exact_results:
-            sql_results = self._search_with_filters(query, filters, top_k=top_k)
+        if not exact_results and not ticket_ids:
+            sql_results = self._search_with_filters(query, filters, top_k=top_k, rbac_roles=rbac_roles)
         stats["sql_results"] = len(sql_results)
 
         # 5.3 Semantic fallback on ticket index (if SQL results insufficient)
         vector_results: List[Dict] = []
-        if not exact_results and len(sql_results) < sql_min_results and vector_store is not None:
+        if not ticket_ids and not exact_results and len(sql_results) < sql_min_results and vector_store is not None:
             stats["semantic_fallback_used"] = True
             raw = vector_store.search(
                 query=query,
                 top_k=top_k,
-                filters={"doc_type": "Ticket"},
+                filters={"doc_type": "Ticket", "repository": allowed_repositories(rbac_roles) or ['__DENIED__']},
                 vector_name="content",
             )
-            for r in raw:
-                p = r["payload"]
-                vector_results.append({
-                    "ticket_id": p.get("ticket_id") or p.get("chunk_id"),
-                    "subject": p.get("section_title", ""),
-                    "description": p.get("content", ""),
-                    "priority": p.get("priority", ""),
-                    "category": p.get("department", ""),
-                    "status": p.get("status", ""),
-                    "resolution": p.get("resolution", ""),
-                    "created_at": p.get("ingested_at", ""),
-                    "_source": "vector",
-                })
+            ids = [r['payload'].get('ticket_id') for r in raw if r['payload'].get('ticket_id')]
+            if ids:
+                vector_results = self.search(query, ticket_ids=ids, top_k=top_k, rbac_roles=rbac_roles)
 
         # 5.4 Merge by ticket_id, dedupe
         merged: Dict[str, Dict] = {}
@@ -1368,11 +1394,12 @@ class TicketRetriever:
         return {"candidates": candidates, "stats": stats}
 
     def _search_with_filters(
-        self, query: str, filters: Dict[str, Any], top_k: int = 5
+        self, query: str, filters: Dict[str, Any], top_k: int = 5, rbac_roles=None
     ) -> List[Dict]:
         """Full-text search combined with structured filters (status, category, priority)."""
-        clauses = ["fts_vector @@ plainto_tsquery('english', :q)"]
-        params: Dict[str, Any] = {"q": query, "limit": top_k}
+        from api.access_control import TICKET_VISIBLE, access_parameters
+        clauses = ["fts_vector @@ plainto_tsquery('english', :q)", TICKET_VISIBLE]
+        params: Dict[str, Any] = {"q": query, "limit": top_k, **access_parameters(rbac_roles)}
 
         for key in ("status", "category", "priority"):
             val = filters.get(key)

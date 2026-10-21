@@ -75,7 +75,7 @@ export default function AccessRequestsAdmin() {
                 <div>
                   <div className="text-sm font-medium text-slate-200">{r.user_name} <span className="text-slate-500">({r.user_email})</span></div>
                   <div className="text-xs text-slate-500 mt-0.5">
-                    Requesting <span className="text-brand-400 font-medium">{r.resource_name}</span> access
+                    Requesting <span className="text-brand-400 font-medium">{r.resource_display_name || r.resource_name}</span> access
                   </div>
                   {r.justification && <div className="text-xs text-slate-400 mt-2 italic">"{r.justification}"</div>}
                   <div className="text-xs text-slate-600 mt-1 flex items-center gap-1">

@@ -4,7 +4,7 @@ import {
   Send, Brain, User, ChevronDown, ChevronUp, ThumbsUp, ThumbsDown,
   Zap, Database, BarChart2, BookOpen, GitBranch,
   Layers, Activity, History, Plus, PanelLeftClose, PanelLeft, Package, Pin, Trash2, X,
-  FolderOpen, FileText, CheckSquare
+  FolderOpen, FileText, CheckSquare, Pencil, Check
 } from 'lucide-react'
 import { api } from '../services/api'
 import BundlePanel from '../components/BundlePanel'
@@ -356,6 +356,10 @@ export default function Chat() {
   const [sessionId, setSessionId] = useState(() => searchParams.get('session') || crypto.randomUUID())
   const [historyOpen, setHistoryOpen] = useState(true)
   const [sessions, setSessions] = useState([])
+  const [editingSession, setEditingSession] = useState(null)
+  const [chatName, setChatName] = useState('')
+  const [savingName, setSavingName] = useState(false)
+  const [renameError, setRenameError] = useState('')
   const [loadingHistory, setLoadingHistory] = useState(false)
 
   // Context sidebar state
@@ -484,6 +488,23 @@ export default function Chat() {
       setSessions([])
     }
   }, [])
+
+  async function saveChatName(event) {
+    event.preventDefault()
+    if (!editingSession || !chatName.trim() || savingName) return
+    setSavingName(true)
+    setRenameError('')
+    try {
+      const updated = await api.renameChatSession(editingSession, chatName.trim())
+      setSessions(previous => previous.map(session => session.session_id === updated.session_id
+        ? { ...session, title: updated.title } : session))
+      setEditingSession(null)
+    } catch (error) {
+      setRenameError(error.message)
+    } finally {
+      setSavingName(false)
+    }
+  }
 
   const refreshBundles = useCallback(async () => {
     try {
@@ -672,6 +693,7 @@ export default function Chat() {
             </button>
           </div>
           <div className="flex-1 overflow-y-auto px-2 py-2">
+            {renameError && <p role="alert" className="text-xs text-red-400 px-2 py-2">{renameError}</p>}
             {sessions.length === 0 ? (
               <div className="px-2 py-4 text-xs text-slate-600 text-center">No previous conversations yet.</div>
             ) : (
@@ -679,19 +701,33 @@ export default function Chat() {
                 <div key={label} className="mb-3">
                   <div className="text-xs font-medium text-slate-600 px-2 py-1.5">{label}</div>
                   {items.map(s => (
-                    <button
+                    <div
                       key={s.session_id}
-                      onClick={() => loadSession(s.session_id)}
                       className={clsx(
-                        'w-full text-left px-2.5 py-2 rounded-lg transition-colors mb-0.5',
+                        'w-full text-left px-2.5 py-2 rounded-lg transition-colors mb-0.5 flex items-center gap-2',
                         s.session_id === sessionId ? 'bg-brand-600/15 text-brand-300' : 'hover:bg-slate-700/30 text-slate-300'
                       )}
                     >
-                      <div className="text-xs truncate">{s.title || 'New Chat'}</div>
-                      <div className="text-xs text-slate-600 mt-0.5">
-                        {s.message_count} messages · {new Date(s.updated_at).toLocaleDateString()}
-                      </div>
-                    </button>
+                      {editingSession === s.session_id ? (
+                        <form onSubmit={saveChatName} className="flex items-center gap-1 w-full">
+                          <input autoFocus aria-label="Chat name" className="input text-xs min-w-0 flex-1"
+                            value={chatName} maxLength={255} disabled={savingName}
+                            onChange={event => setChatName(event.target.value)}
+                            onKeyDown={event => { if (event.key === 'Escape' && !savingName) setEditingSession(null) }} />
+                          <button type="submit" aria-label="Save chat name" disabled={savingName || !chatName.trim()}><Check size={14} /></button>
+                          <button type="button" aria-label="Cancel rename" disabled={savingName} onClick={() => setEditingSession(null)}><X size={14} /></button>
+                        </form>
+                      ) : <>
+                        <button onClick={() => loadSession(s.session_id)} className="min-w-0 flex-1 text-left">
+                          <div className="text-xs truncate">{s.title || 'New Chat'}</div>
+                          <div className="text-xs text-slate-600 mt-0.5">
+                            {s.message_count} messages · {new Date(s.updated_at).toLocaleDateString()}
+                          </div>
+                        </button>
+                        <button title="Rename chat" aria-label={`Rename ${s.title || 'chat'}`} className="text-slate-500 hover:text-slate-200 flex-shrink-0"
+                          onClick={() => { setEditingSession(s.session_id); setChatName(s.title || ''); setRenameError('') }}><Pencil size={13} /></button>
+                      </>}
+                    </div>
                   ))}
                 </div>
               ))

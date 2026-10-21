@@ -13,12 +13,47 @@ An enterprise-grade RAG platform that goes far beyond generic chatbot RAG. The c
 
 ## Temporary sharing from this laptop
 
+For OpenRouter credential failover, set `OPENROUTER_API_KEYS` in the ignored
+`configs/.env` to a comma-separated list of keys. This overrides the legacy
+`OPENROUTER_API_KEY`. Requests try each configured key at most once on HTTP,
+connection, timeout, or invalid-response errors and retain the working key for
+subsequent requests. Free-model validation and zero-price limits apply to every
+attempt. Restart the backend after changing credentials; never commit keys.
+
 Ticket access follows the signed-in account's department roles: HR sees HR tickets,
 Finance sees Finance, developers see Engineering and Projects, and IT sees IT,
 Operations, and Security. Administrators see all ticket categories. The backend
 applies these rules before search limits, category counts, and known-issue summaries;
 requesting another department's category does not grant access. Dashboard ticket
 cards continue to count the signed-in user's own requests.
+
+Dashboard consolidation is restricted to the ADMIN role. Admin dashboards show
+query totals, average confidence/latency, trends, recent queries, tickets and
+pending requests across all users. Other accounts retain personal query metrics,
+their own requested tickets and pending requests, and accessible knowledge counts.
+The backend selects the scope from the authenticated account; client-supplied
+user IDs or scope parameters cannot enable consolidated statistics.
+
+Chat history lists only conversations containing both a user query and an
+assistant answer. Message counts exclude model/document selection events, which
+remain in the inline timeline. Context-only drafts do not appear in history.
+Use the pencil beside a saved chat to rename it; names are owner-scoped and
+persist across later turns.
+
+The Request File Access picker lists filenames from every repository through an
+authenticated metadata-only catalog. Requests identify a document by its stable
+ID (`resource_type: file`, `resource_name: FILE:<document UUID>`). Approval grants
+only that document: it becomes available in listings, citation links, bundles,
+and chat retrieval without granting its department role or tickets. Pending or
+rejected requests grant no access. Request history displays the filename.
+
+Tickets support server pagination (`GET /tickets?page=1&page_size=20`) with
+department-scoped totals, search, category and priority filters. The UI offers
+10, 20, 50 or 100 tickets per page. Ticket ingestion preserves the original SQL
+category and ticket ID in both search indexes; chat checks ticket categories
+before building context. For existing indexes, run
+`python -m scripts.repair_ticket_permissions` once to repair ticket metadata from
+SQL, then restart the backend to reload BM25. The repair saves local backups.
 
 The native laptop setup includes `scripts/start-sharing.ps1` and
 `scripts/stop-sharing.ps1`. The start script expects the workspace's
@@ -249,7 +284,7 @@ Open **http://localhost:3000** in your browser.
 1. Open http://localhost:3000/admin
 2. Click the **"Upload"** tab
 3. Under **"Load Tickets CSV"**, click the upload area
-4. Select your `tickets.csv` file
+4. Select `input/IT Tickets/merged_tickets_realistic.csv`
 5. Wait ~30 seconds → you'll see "✓ 2001 tickets ingested"
 
 ### Load GitLab Handbook PDFs
@@ -267,7 +302,7 @@ Or use the bulk script (faster):
 python scripts/bulk_ingest.py --folder /path/to/gitlab-handbooks --origin EXTERNAL --repository External
 
 # Then ingest tickets
-python scripts/bulk_ingest.py --tickets tickets.csv
+python scripts/bulk_ingest.py --tickets "input/IT Tickets/merged_tickets_realistic.csv"
 ```
 
 ---

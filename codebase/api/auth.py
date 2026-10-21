@@ -258,12 +258,24 @@ class AuthService:
         resource_type: str = "access_role",
     ) -> dict:
         with self.engine.begin() as conn:
+            if resource_name.upper().startswith('FILE:') or resource_type == 'file':
+                from uuid import UUID
+                try:
+                    doc_id = str(UUID(resource_name[5:] if resource_name.upper().startswith('FILE:') else resource_name))
+                except ValueError:
+                    raise HTTPException(400, 'Select a valid document to request file access')
+                document = conn.execute(text('SELECT doc_id FROM documents WHERE doc_id=:did'), {'did':doc_id}).fetchone()
+                if not document:
+                    raise HTTPException(404, 'Document not found')
+                resource_name, resource_type = 'FILE:' + doc_id, 'file'
+            elif resource_type != 'access_role':
+                raise HTTPException(400, 'Unsupported access request type')
             # Already have it?
             has_it = conn.execute(
                 text("SELECT access_roles FROM users WHERE user_id = :uid"),
                 {"uid": user_id},
             ).fetchone()
-            if has_it and resource_name in (has_it.access_roles or []):
+            if has_it and resource_name.upper() in {r.upper() for r in (has_it.access_roles or [])}:
                 raise HTTPException(status_code=400, detail=f"You already have {resource_name} access")
 
             # Pending duplicate?
@@ -295,10 +307,13 @@ class AuthService:
             "SELECT ar.request_id, ar.user_id, u.email as user_email, u.username as user_name, "
             "ar.resource_type, ar.resource_name, ar.justification, ar.status, "
             "ar.rejection_reason, ar.requested_at, ar.resolved_at, "
-            "r.username as resolved_by_name "
+            "r.username as resolved_by_name, "
+            "CASE WHEN ar.resource_type='file' THEN COALESCE(d.source_file,d.title,'Unavailable document') "
+            "ELSE ar.resource_name END AS resource_display_name "
             "FROM access_requests ar "
             "JOIN users u ON u.user_id = ar.user_id "
             "LEFT JOIN users r ON r.user_id = ar.resolved_by "
+            "LEFT JOIN documents d ON ar.resource_type='file' AND LOWER(ar.resource_name)='file:' || d.doc_id::text "
         )
         params = {}
         if user_id:

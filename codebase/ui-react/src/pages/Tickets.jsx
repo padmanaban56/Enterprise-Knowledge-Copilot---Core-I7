@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   Search,
@@ -62,8 +62,11 @@ function KnownIssueCard({ issue }) {
 export default function Tickets() {
   const [searchParams] = useSearchParams()
   const [query, setQuery] = useState(() => searchParams.get('search') || '')
-  const [results, setResults] = useState(null)
-  const [recent, setRecent] = useState([])
+  const [results, setResults] = useState({ tickets: [], total: 0, total_pages: 0 })
+  const [appliedQuery, setAppliedQuery] = useState(() => searchParams.get('search') || '')
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
+  const [error, setError] = useState(null)
   const [categories, setCategories] = useState([])
   const [searching, setSearching] = useState(false)
   const [catFilter, setCatFilter] = useState('')
@@ -80,31 +83,26 @@ export default function Tickets() {
   }
 
   useEffect(() => {
-    api.recentTickets(15).then(r => setRecent(r.tickets || []))
-    api.ticketCategories().then(r => setCategories(r.categories || []))
+    api.ticketCategories().then(r => setCategories(r.categories || [])).catch(e => setError(e.message))
   }, [])
-
-  const handleSearch = useCallback(async () => {
-    if (!query.trim()) return
-    setSearching(true)
-    try {
-      const r = await api.searchTickets(
-        query,
-        catFilter || undefined,
-        priFilter || undefined,
-        15
-      )
-      setResults(r)
-    } finally {
-      setSearching(false)
-    }
-  }, [query, catFilter, priFilter])
 
   useEffect(() => {
-    if (searchParams.get('search')) handleSearch()
-  }, [])
+    let active = true
+    setSearching(true)
+    setError(null)
+    setExpanded({})
+    api.ticketPage({ q: appliedQuery, category: catFilter, priority: priFilter, page, pageSize }).then(r => {
+      if (!active) return
+      setResults(r)
+      if (r.page !== page) setPage(r.page)
+    }).catch(e => { if (active) { setError(e.message); setResults({ tickets: [], total: 0, total_pages: 0 }) } })
+      .finally(() => { if (active) setSearching(false) })
+    return () => { active = false }
+  }, [appliedQuery, catFilter, priFilter, page, pageSize])
 
-  const tickets = results ? results.tickets : recent
+  function handleSearch() { setAppliedQuery(query.trim()); setPage(1) }
+
+  const tickets = searching ? [] : results.tickets
 
   return (
     <div className="p-6 animate-fade-in">
@@ -124,7 +122,7 @@ export default function Tickets() {
         <div className="grid grid-cols-3 lg:grid-cols-6 gap-2 mb-5">
           {categories.slice(0, 6).map(cat => (
             <button key={cat.category}
-              onClick={() => { setCatFilter(cat.category === catFilter ? '' : cat.category) }}
+              onClick={() => { setCatFilter(cat.category === catFilter ? '' : cat.category); setPage(1) }}
               className={`card-hover p-3 text-center transition-all ${catFilter === cat.category ? 'border-brand-500/60 bg-brand-600/10' : ''}`}>
               <div className="text-base font-bold text-slate-200">{cat.total}</div>
               <div className="text-xs text-slate-500 truncate">{cat.category}</div>
@@ -142,7 +140,7 @@ export default function Tickets() {
 
           <input
             className="input pl-9"
-            placeholder="Search tickets..."
+            placeholder="Search by ticket ID, subject, or keywords..."
             value={query}
             onChange={e => setQuery(e.target.value)}
             onKeyDown={e => e.key === 'Enter' && handleSearch()}
@@ -152,7 +150,7 @@ export default function Tickets() {
         <select
           className="input w-40"
           value={catFilter}
-          onChange={e => setCatFilter(e.target.value)}
+          onChange={e => { setCatFilter(e.target.value); setPage(1) }}
         >
           <option value="">All Departments</option>
 
@@ -166,7 +164,7 @@ export default function Tickets() {
         <select
           className="input w-36"
           value={priFilter}
-          onChange={e => setPriFilter(e.target.value)}
+          onChange={e => { setPriFilter(e.target.value); setPage(1) }}
         >
           <option value="">All Priority</option>
           <option value="High">High</option>
@@ -184,16 +182,25 @@ export default function Tickets() {
 
       </div>
 
+      {error && <div role="alert" className="mb-4 text-sm text-red-400">{error}</div>}
+      <div className="flex items-center justify-end gap-2 mb-3 text-sm text-slate-400">
+        <label htmlFor="ticket-page-size">Tickets per page</label>
+        <select id="ticket-page-size" className="input w-24" value={pageSize}
+          onChange={e => { setPageSize(Number(e.target.value)); setPage(1) }}>
+          {[10, 20, 50, 100].map(size => <option key={size} value={size}>{size}</option>)}
+        </select>
+      </div>
       {/* RESULTS */}
       <div className="card overflow-hidden">
 
         <div className="px-4 py-3 border-b border-slate-700 text-xs text-slate-400">
-          {tickets.length} tickets
+          {searching ? 'Loading tickets...' : `${results.total ? (page - 1) * pageSize + 1 : 0}–${Math.min(page * pageSize, results.total)} of ${results.total} tickets`}
+          {!searching && appliedQuery && <span className="ml-2 text-slate-500">{results.match_type === 'exact' ? 'Exact match' : 'Keyword matches'}</span>}
         </div>
 
         {tickets.length === 0 ? (
           <div className="p-10 text-center text-slate-600">
-            No tickets found
+            {searching ? 'Loading tickets...' : 'No tickets found'}
           </div>
         ) : (
           <div className="divide-y divide-slate-700/20">
@@ -355,6 +362,11 @@ export default function Tickets() {
           </div>
         )}
       </div>
+      <nav aria-label="Ticket pagination" className="flex items-center justify-between gap-3 mt-4 text-sm text-slate-400">
+        <button className="btn-ghost" disabled={searching || page <= 1} onClick={() => setPage(p => p - 1)}>Previous</button>
+        <span aria-live="polite">Page {page} of {Math.max(1, results.total_pages)}</span>
+        <button className="btn-ghost" disabled={searching || page >= results.total_pages} onClick={() => setPage(p => p + 1)}>Next</button>
+      </nav>
     </div>
   )
 }

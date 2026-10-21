@@ -184,7 +184,6 @@ function UploadJobRow({ job, onCancel }) {
 }
 
 export default function Admin() {
-  const [status, setStatus]           = useState(null)
   const [evalMetrics, setEvalMetrics] = useState(null)
   const [gaps, setGaps]               = useState([])
   const [feedback, setFeedback]       = useState(null)
@@ -200,7 +199,6 @@ export default function Admin() {
   const [clearResult, setClearResult] = useState(null)
 
   const loadAll = () => {
-    api.status().then(setStatus).catch(()=>{})
     api.evaluationMetrics(7).then(setEvalMetrics).catch(()=>{})
     api.getKnowledgeGaps(20).then(r => setGaps(r.gaps || [])).catch(()=>{})
     api.getFeedbackSummary(7).then(setFeedback).catch(()=>{})
@@ -337,8 +335,6 @@ export default function Admin() {
     try {
       const res = await api.clearKnowledgeBase(clearModal)
       setClearResult({ ok: true, ...res })
-      // Refresh status bar (doc/vector counts) after clearing
-      api.status().then(setStatus).catch(() => {})
     } catch (e) {
       setClearResult({ ok: false, message: e.message })
     } finally {
@@ -352,7 +348,6 @@ export default function Admin() {
     setClearConfirmText('')
     setClearResult(null)
   }
-  const StatusDot = ({ok}) => <div className={`w-2 h-2 rounded-full ${ok?'bg-emerald-400':'bg-red-400'}`}/>
 
   const TABS = [
     {id:'upload', label:'Upload'},
@@ -373,23 +368,6 @@ export default function Admin() {
         </div>
         <button className="btn-ghost text-xs" onClick={loadAll}><RefreshCw size={12}/>Refresh</button>
       </div>
-
-      {/* Status bar */}
-      {status && (
-        <div className="card p-4 flex flex-wrap gap-6 text-sm">
-          {[
-            {ok: status.ollama_ready, label: 'Ollama LLM', sub: status.model},
-            {ok: status.qdrant?.status !== 'error', label: 'Qdrant', sub: `${(status.qdrant?.vectors_count||0).toLocaleString()} vectors`},
-            {ok: true, label: 'BM25', sub: `${(status.bm25_docs||0).toLocaleString()} docs`},
-            {ok: true, label: 'Embeddings', sub: status.embedding_model?.split('/').pop()},
-          ].map(({ok,label,sub}) => (
-            <div key={label} className="flex items-center gap-2">
-              <StatusDot ok={ok}/>
-              <div><div className="text-slate-300 text-xs font-medium">{label}</div><div className="text-xs text-slate-600">{sub}</div></div>
-            </div>
-          ))}
-        </div>
-      )}
 
       {/* Tabs */}
       <div className="flex border-b border-slate-700/50">

@@ -49,6 +49,8 @@ class RawDocument:
 
 @dataclass
 class Chunk:
+    category: str = ""
+    ticket_id: str = ""
     chunk_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     doc_id: str = ""
     chunk_index: int = 0

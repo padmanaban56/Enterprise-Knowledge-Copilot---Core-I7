@@ -9,7 +9,7 @@ from api.model_service import ModelService, is_free_model, is_answer_model
 class ModelServiceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.service = ModelService()
-        self.service.settings = self.service.settings.model_copy(update={'openrouter_api_key':SecretStr('test-secret')})
+        self.service.settings = self.service.settings.model_copy(update={'openrouter_api_key':SecretStr('test-secret'), 'openrouter_api_keys':SecretStr('')})
         self.service.openrouter_models = AsyncMock(return_value=[{'id':'test/model:free','pricing':{'prompt':'0','completion':'0'}}])
 
     def client(self, response):
@@ -35,6 +35,61 @@ class ModelServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException) as error:
             await self.service.validate('openrouter','missing/model')
         self.assertEqual(error.exception.status_code,400)
+
+    def configure_failover(self):
+        self.service.settings = self.service.settings.model_copy(update={
+            'openrouter_api_keys':SecretStr('first-test-key,second-test-key')})
+
+    async def test_failure_switches_key_and_keeps_working_key_for_next_request(self):
+        self.configure_failover()
+        ok = httpx.Response(200,json={'choices':[{'message':{'content':'Answer'}}]})
+        for status in [400,401,402,403,429,500,503]:
+            self.service._active_key_index = 0
+            client = self.client(ok)
+            client.post.side_effect = [httpx.Response(status,json={'error':'private details'}),ok,ok]
+            with patch('api.model_service.httpx.AsyncClient',return_value=client):
+                self.assertEqual(await self.service.complete('test/model:free','system','synthetic'), 'Answer')
+                await self.service.complete('test/model:free','system','next synthetic')
+            self.assertEqual([c.kwargs['headers']['Authorization'] for c in client.post.call_args_list],
+                ['Bearer first-test-key','Bearer second-test-key','Bearer second-test-key'])
+            for call in client.post.call_args_list:
+                self.assertEqual(call.kwargs['json']['model'],'test/model:free')
+                self.assertEqual(call.kwargs['json']['provider']['max_price'],{'prompt':0,'completion':0,'request':0,'image':0})
+
+    async def test_timeout_connection_failure_and_empty_answer_fail_over(self):
+        self.configure_failover()
+        ok = httpx.Response(200,json={'choices':[{'message':{'content':'Answer'}}]})
+        for failure in [httpx.ReadTimeout('private details'),httpx.ConnectError('private details'),
+                        httpx.Response(200,json={'choices':[]}),httpx.Response(200,text='not json')]:
+            self.service._active_key_index = 0
+            client = self.client(ok)
+            client.post.side_effect = [failure,ok]
+            with patch('api.model_service.httpx.AsyncClient',return_value=client):
+                self.assertEqual(await self.service.complete('test/model:free','system','synthetic'),'Answer')
+            self.assertEqual(client.post.await_count,2)
+
+    async def test_all_failed_keys_are_tried_once_without_exposing_keys_or_upstream_body(self):
+        self.configure_failover()
+        client = self.client(httpx.Response(401,json={'error':'private details'}))
+        with patch('api.model_service.httpx.AsyncClient',return_value=client):
+            with self.assertRaises(HTTPException) as error:
+                await self.service.complete('test/model:free','system','synthetic')
+        self.assertEqual(client.post.await_count,2)
+        self.assertNotIn('private details',error.exception.detail)
+        self.assertNotIn('first-test-key',error.exception.detail)
+        self.assertNotIn('second-test-key',error.exception.detail)
+
+    async def test_failover_wraps_back_to_first_key_and_deduplicates_configuration(self):
+        self.configure_failover()
+        self.service._active_key_index = 1
+        client = self.client(httpx.Response(200,json={'choices':[{'message':{'content':'Answer'}}]}))
+        client.post.side_effect = [httpx.Response(429),client.post.return_value]
+        with patch('api.model_service.httpx.AsyncClient',return_value=client):
+            await self.service.complete('test/model:free','system','synthetic')
+        self.assertEqual([c.kwargs['headers']['Authorization'] for c in client.post.call_args_list],
+            ['Bearer second-test-key','Bearer first-test-key'])
+        self.service.settings = self.service.settings.model_copy(update={'openrouter_api_keys':SecretStr(' first-test-key,first-test-key,second-test-key ' )})
+        self.assertEqual(self.service._keys(),['first-test-key','second-test-key'])
 
     async def test_upstream_failure_is_actionable_and_does_not_expose_body(self):
         for status,word in ((401,'API key'),(402,'account limits'),(429,'rate limited')):
