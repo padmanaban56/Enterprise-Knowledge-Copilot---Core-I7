@@ -12,9 +12,15 @@ $pythonBinary = Join-Path $appDirectory '.venv/Scripts/python.exe'
 
 New-Item -ItemType Directory -Force -Path $logDirectory | Out-Null
 New-Item -ItemType Directory -Force -Path (Split-Path $tunnelBinary -Parent) | Out-Null
+function Start-SharingSleepBlocker([int]$TunnelProcessId, [int]$GatewayProcessId) {
+    $awakeScript = Join-Path $PSScriptRoot 'keep-sharing-awake.ps1'
+    Start-Process -FilePath "$PSHOME/powershell.exe" -WindowStyle Hidden `
+        -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$awakeScript`" -TunnelProcessId $TunnelProcessId -GatewayProcessId $GatewayProcessId" | Out-Null
+}
 if (Test-Path -LiteralPath $statePath) {
     $previousState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
     if (Get-Process -Id $previousState.tunnel_pid -ErrorAction SilentlyContinue) {
+        Start-SharingSleepBlocker $previousState.tunnel_pid $previousState.gateway_pid
         Write-Host "Sharing is already running: $($previousState.url)"
         Write-Host "Sharing credentials: $accessPath"
         exit 0
@@ -95,9 +101,10 @@ try {
         ConvertTo-Json | Set-Content -LiteralPath $accessPath -Encoding UTF8
     @{url=$sharingUrl; gateway_pid=$gatewayProcess.Id; tunnel_pid=$tunnelProcess.Id; port=$Port; started_at=(Get-Date).ToUniversalTime().ToString('o')} |
         ConvertTo-Json | Set-Content -LiteralPath $statePath -Encoding UTF8
+    Start-SharingSleepBlocker $tunnelProcess.Id $gatewayProcess.Id
     Write-Host "Sharing link: $sharingUrl"
     Write-Host "Sharing credentials: $accessPath"
-    Write-Host 'Keep this laptop awake and online. Run stop-sharing.ps1 to close access.'
+    Write-Host 'Idle sleep is blocked while sharing runs. Keep this laptop powered and online. Run stop-sharing.ps1 to close access.'
 } catch {
     if ($tunnelProcess) { Stop-Process -Id $tunnelProcess.Id -ErrorAction SilentlyContinue }
     if ($gatewayProcess) {

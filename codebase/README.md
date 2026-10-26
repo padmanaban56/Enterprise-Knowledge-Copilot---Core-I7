@@ -71,6 +71,11 @@ disables demo SSO provisioning, and limits shared uploads to 32 MB.
 ```
 
 Stopping sharing closes the public link and leaves the local app running.
+The sharing launcher blocks Windows idle sleep while the tunnel and gateway run;
+the screen can still turn off. The blocker exits automatically when either process
+stops. Keep the laptop plugged in, online, and its lid open: manual sleep, shutdown,
+lid-close sleep, and loss of connectivity still interrupt sharing. Quick Tunnels
+are temporary and have no uptime guarantee.
 Shared traffic passes through Cloudflare. Links change on each new tunnel.
 
 Source lists group repeated chunks from the same document into one card and
